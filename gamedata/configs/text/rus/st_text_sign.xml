@@ -1,0 +1,63 @@
+<?xml version='1.0' encoding='windows-1251'?>
+<string_table>
+	<string id="st_prop_text_sign_paper_item">
+		<text>Текстовая табличка (бумага)</text>
+	</string>
+	<string id="st_prop_text_sign_wood_item">
+		<text>Текстовая табличка (дерево)</text>
+	</string>
+	<string id="st_prop_text_sign_board_green_item">
+		<text>Текстовая табличка (зелёная доска)</text>
+	</string>
+	<string id="st_prop_text_sign_board_black_item">
+		<text>Текстовая табличка (чёрная доска)</text>
+	</string>
+	<string id="st_prop_text_sign_graffiti_item">
+		<text>Текстовая табличка (граффити)</text>
+	</string>
+	<string id="st_prop_text_sign_item_descr">
+        <text>ХАРАКТЕРИСТИКИ:\n%c[255,90,145,255] • %c[ui_gray_2] Возможность размещения.\n%c[255,43,205,188] • %c[ui_gray_2] Для редактирования удерживайте кнопку взаимодействия.\n%c[255,235,70,70] • %c[ui_gray_2] Не более 256 универсальных табличек на одной локации.\n%c[255,245,210,70] • %c[ui_gray_2] Динамический кэш — каждый пиксель занимает место на диске. Кэш хранится в папке мода.\n%c[255,80,220,100] • %c[ui_gray_2] Поддержка Anomaly Together 3.</text>
+	</string>
+	<string id="st_text_sign_menu">
+		<text>Взаимодействовать</text>
+	</string>
+	<string id="st_text_sign_input_label">
+		<text>Текст:</text>
+	</string>
+	<string id="st_text_sign_font_family">
+		<text>Шрифт:</text>
+	</string>
+	<string id="st_text_sign_font_variant">
+		<text>[Шрифт] Стиль:</text>
+	</string>
+	<string id="st_text_sign_text_size">
+		<text>[Шрифт] Масштаб:</text>
+	</string>
+	<string id="st_text_sign_color_red">
+		<text>[Цвет] R:</text>
+	</string>
+	<string id="st_text_sign_color_green">
+		<text>[Цвет] G:</text>
+	</string>
+	<string id="st_text_sign_color_blue">
+		<text>[Цвет] B:</text>
+	</string>
+	<string id="st_text_sign_color_transparency">
+		<text>[Цвет] Прозрачность:</text>
+	</string>
+	<string id="st_text_sign_size_width">
+		<text>[Табличка] Ширина:</text>
+	</string>
+	<string id="st_text_sign_size_height">
+		<text>[Табличка] Высота:</text>
+	</string>
+	<string id="st_text_sign_offset_x">
+		<text>[Табличка] X:</text>
+	</string>
+	<string id="st_text_sign_offset_y">
+		<text>[Табличка] Y:</text>
+	</string>
+	<string id="st_text_sign_offset_z">
+		<text>[Табличка] Z:</text>
+	</string>
+</string_table>
