@@ -16,8 +16,7 @@
 		<text>Text graffiti</text>
 	</string>
 	<string id="st_prop_text_sign_item_descr">
-        <text>FEATURES:\n%c[255,90,145,255] • %c[ui_gray_2] Can be placed.\n%c[255,43,205,188] • %c[ui_gray_2] Hold the interaction key to edit.\n%c[255,235,70,70] • %c[ui_gray_2] Maximum of 256 universal signs per location.\n%c[255,245,210,70] • %c[ui_gray_2] Dynamic cache — each pixel takes up disk space. The cache is stored in the mod folder.\n%c[255,80,220,100] • %c[ui_gray_2] Anomaly Together 3 support.</text>
-	</string>
+        <text>FEATURES:\n%c[255,90,145,255] • %c[ui_gray_2] Can be placed.\n%c[255,43,205,188] • %c[ui_gray_2] Hold the interaction key to edit.\n%c[255,210,90,220] • %c[ui_gray_2] \&#8203;n — line break.\n%c[255,235,70,70] • %c[ui_gray_2] Maximum of 256 universal signs per location.\n%c[255,245,210,70] • %c[ui_gray_2] Dynamic cache — each pixel takes up disk space. The cache is stored in the mod folder.\n%c[255,80,220,100] • %c[ui_gray_2] Anomaly Together 3 support.</text>	</string>
 	<string id="st_text_sign_menu">
 		<text>Interact</text>
 	</string>
