@@ -34,5 +34,5 @@
 ## [⬇️] Installation || Установка
 Ставить ниже протестированных модов.
 ## [📙] Licensed || Лицензия
-### -> [CC-BY-NC-SA-4.0](https://github.com/Asvort/Fix-artifact-spawning?tab=License-1-ov-file)
+### -> [CC-BY-NC-SA-4.0](https://github.com/Asvort/Text-sign?tab=License-1-ov-file)
 <img width="1023" height="575" alt="CC-BY-NC-SA-4.0" src="https://github.com/user-attachments/assets/7bec2c9e-5cb8-45c9-8aa9-3de445b20684" />
