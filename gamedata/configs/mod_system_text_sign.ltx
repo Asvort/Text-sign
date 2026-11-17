@@ -1,0 +1,93 @@
+[text_sign]:physic_object
+visual = dynamics\text_sign\text_sign_holder.ogf
+placeable_type = prop
+base_rotation = 0
+
+script_binding = text_sign.init
+
+ui_on_interaction = text_sign.open_placeable_sign
+
+bounding_box_size = 0.1264044, 0.1264044, 0.012
+bounding_box_origin = 0, 0.0008372, -0.006
+
+fixed_bones = link
+
+[text_sign_paper]:text_sign
+item_section = prop_text_sign_paper_item
+ui_texture = ui_text_sign_paper
+
+[text_sign_wood]:text_sign
+item_section = prop_text_sign_wood_item
+ui_texture = ui_text_sign_wood
+
+[text_sign_board_green]:text_sign
+item_section = prop_text_sign_board_green_item
+ui_texture = ui_text_sign_board_green
+
+[text_sign_board_black]:text_sign
+item_section = prop_text_sign_board_black_item
+ui_texture = ui_text_sign_board_black
+
+[text_sign_graffiti]:text_sign
+item_section = prop_text_sign_graffiti_item
+ui_texture = ui_text_sign_graffiti
+
+[prop_text_sign_item]:tch_junk
+class = II_ATTCH
+kind = i_tool
+visual = dynamics\text_sign\text_sign_base_paper.ogf
+
+description = st_prop_text_sign_item_descr
+
+icons_texture = ui\ui_text_sign
+inv_grid_y = 0
+inv_grid_width = 2
+inv_grid_height = 2
+
+cost = 350
+quest_item = false
+
+use1_functor = placeable_furniture.place_item
+use1_action_functor = placeable_furniture.func_place_item
+
+placeable_type = prop
+
+[prop_text_sign_paper_item]:prop_text_sign_item
+visual = dynamics\text_sign\text_sign_base_paper.ogf
+inv_name = st_prop_text_sign_paper_item
+inv_name_short = st_prop_text_sign_paper_item
+inv_weight = 0.01
+inv_grid_x = 0
+placeable_section = text_sign_paper
+
+[prop_text_sign_wood_item]:prop_text_sign_item
+visual = dynamics\text_sign\text_sign_base_wood.ogf
+inv_name = st_prop_text_sign_wood_item
+inv_name_short = st_prop_text_sign_wood_item
+inv_weight = 0.35
+inv_grid_x = 2
+placeable_section = text_sign_wood
+
+[prop_text_sign_board_green_item]:prop_text_sign_item
+visual = dynamics\text_sign\text_sign_base_board_green.ogf
+inv_name = st_prop_text_sign_board_green_item
+inv_name_short = st_prop_text_sign_board_green_item
+inv_weight = 0.55
+inv_grid_x = 4
+placeable_section = text_sign_board_green
+
+[prop_text_sign_board_black_item]:prop_text_sign_item
+visual = dynamics\text_sign\text_sign_base_board_black.ogf
+inv_name = st_prop_text_sign_board_black_item
+inv_name_short = st_prop_text_sign_board_black_item
+inv_weight = 0.60
+inv_grid_x = 6
+placeable_section = text_sign_board_black
+
+[prop_text_sign_graffiti_item]:prop_text_sign_item
+visual = dynamics\text_sign\text_sign_base_graffiti.ogf
+inv_name = st_prop_text_sign_graffiti_item
+inv_name_short = st_prop_text_sign_graffiti_item
+inv_weight = 0.05
+inv_grid_x = 8
+placeable_section = text_sign_graffiti

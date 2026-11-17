@@ -1,0 +1,47 @@
+<w>
+    <text_sign_config x="162" y="410" width="700" height="330" stretch="1">
+        <frame x="0" y="0" width="700" height="330" stretch="1">
+            <texture r="150" g="150" b="150" a="150">ui_icons_PDA_tooltips</texture>
+        </frame>
+
+        <scroll x="20" y="10" width="660" height="320" right_ident="0" left_ident="0" top_indent="0" bottom_indent="0" vert_interval="0" always_show_scroll="0"/>
+        <st x="0" y="0" width="660" height="30"/>
+
+        <divider x="0" y="0" width="640" height="16" stretch="1">
+            <line x="0" y="0" width="640" height="16" stretch="1">
+                <texture r="200" g="200" b="200" a="255">ui_inGame2_opt_slider_bar_back</texture>
+            </line>
+        </divider>
+
+        <cap x="0" y="0" width="210" height="20" stretch="1">
+            <text r="200" g="200" b="200" align="l" vert_align="c" font="letterica16"/>
+        </cap>
+
+        <num x="210" y="0" width="130" height="20" stretch="1">
+            <text complex_mode="1" r="200" g="150" b="100" align="c" vert_align="c" font="letterica16"/>
+        </num>
+
+        <input x="210" y="0" width="418" height="25">
+            <text x="5" r="220" g="220" b="220" font="letterica16" vert_align="c" align="l"/>
+            <texture>ui_inGame2_edit_box_2</texture>
+        </input>
+
+        <track x="352.5" y="2" width="275" height="16" stretch="1" step="0.5"/>
+
+        <color_preview x="310" y="16" width="12" height="48" stretch="1">
+            <texture r="255" g="255" b="255" a="255">ui\text_sign_color_preview</texture>
+        </color_preview>
+
+        <command_button_frame x="0" y="0" width="640" height="25" stretch="1">
+            <texture>ui_stroketextbox</texture>
+        </command_button_frame>
+
+        <command_button x="0" y="0" width="640" height="25" stretch="1">
+            <texture>ui_button_inv</texture>
+        </command_button>
+
+        <command_button_text x="0" y="0" width="640" height="25" stretch="1">
+            <text complex_mode="1" r="220" g="220" b="220" align="c" vert_align="c" font="letterica16"/>
+        </command_button_text>
+    </text_sign_config>
+</w>

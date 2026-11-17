@@ -1,0 +1,9 @@
+<w>
+	<file name="ui\ui_text_sign">
+		<texture id="ui_text_sign_paper" x="0" y="0" width="100" height="100"/>
+		<texture id="ui_text_sign_wood" x="100" y="0" width="100" height="100"/>
+		<texture id="ui_text_sign_board_green" x="200" y="0" width="100" height="100"/>
+		<texture id="ui_text_sign_board_black" x="300" y="0" width="100" height="100"/>
+		<texture id="ui_text_sign_graffiti" x="400" y="0" width="100" height="100"/>
+	</file>
+</w>

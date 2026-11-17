@@ -1,0 +1,63 @@
+<?xml version='1.0' encoding='windows-1251'?>
+<string_table>
+	<string id="st_prop_text_sign_paper_item">
+		<text>Text sign (paper)</text>
+	</string>
+	<string id="st_prop_text_sign_wood_item">
+		<text>Text sign (wood)</text>
+	</string>
+	<string id="st_prop_text_sign_board_green_item">
+		<text>Text sign (green chalkboard)</text>
+	</string>
+	<string id="st_prop_text_sign_board_black_item">
+		<text>Text sign (black chalkboard)</text>
+	</string>
+	<string id="st_prop_text_sign_graffiti_item">
+		<text>Text graffiti</text>
+	</string>
+	<string id="st_prop_text_sign_item_descr">
+        <text>FEATURES:\n%c[255,90,145,255] • %c[ui_gray_2] Can be placed.\n%c[255,43,205,188] • %c[ui_gray_2] Hold the interaction key to edit.\n%c[255,235,70,70] • %c[ui_gray_2] Maximum of 256 universal signs per location.\n%c[255,245,210,70] • %c[ui_gray_2] Dynamic cache — each pixel takes up disk space. The cache is stored in the mod folder.\n%c[255,80,220,100] • %c[ui_gray_2] Anomaly Together 3 support.</text>
+	</string>
+	<string id="st_text_sign_menu">
+		<text>Interact</text>
+	</string>
+	<string id="st_text_sign_input_label">
+		<text>Text:</text>
+	</string>
+	<string id="st_text_sign_font_family">
+		<text>Font:</text>
+	</string>
+	<string id="st_text_sign_font_variant">
+		<text>[Font] Style:</text>
+	</string>
+	<string id="st_text_sign_text_size">
+		<text>[Font] Scale:</text>
+	</string>
+	<string id="st_text_sign_color_red">
+		<text>[Color] R:</text>
+	</string>
+	<string id="st_text_sign_color_green">
+		<text>[Color] G:</text>
+	</string>
+	<string id="st_text_sign_color_blue">
+		<text>[Color] B:</text>
+	</string>
+	<string id="st_text_sign_color_transparency">
+		<text>[Color] Transparency:</text>
+	</string>
+	<string id="st_text_sign_size_width">
+		<text>[Sign] Width:</text>
+	</string>
+	<string id="st_text_sign_size_height">
+		<text>[Sign] Height:</text>
+	</string>
+	<string id="st_text_sign_offset_x">
+		<text>[Sign] X:</text>
+	</string>
+	<string id="st_text_sign_offset_y">
+		<text>[Sign] Y:</text>
+	</string>
+	<string id="st_text_sign_offset_z">
+		<text>[Sign] Z:</text>
+	</string>
+</string_table>

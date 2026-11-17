@@ -1,0 +1,2423 @@
+local sign_text_max_length = 240
+local sign_texture_slots = 256
+local released_slot_cleanup_delay = 250
+local network_update_delay = 5000
+local storage_retry_delay = 1000
+local storage_retry_limit = 3
+local sign_text_size_default = 100
+local sign_text_size_min = 20
+local sign_text_size_max = 300
+local sign_text_alpha_default = 100
+local sign_text_alpha_min = 0
+local sign_text_alpha_max = 100
+local sign_size_default = 10
+local sign_size_min = 10
+local sign_size_max = 500
+local sign_size_scale_reference = 100
+local sign_offset_default = 0
+local sign_offset_limit = 125
+local sign_half = 0.0634
+local sign_surface_offset_y = 0.001
+local sign_data_key = "text_sign"
+local sign_attachment_name = "text_sign_surface"
+local default_font_family = "Minecraft Rus"
+local default_font_variant = "Minecraft.ttf"
+
+local sign_materials = {
+	paper = {
+		section = "text_sign_paper",
+		overlay_visual = "dynamics\\text_sign\\text_sign_overlay_paper.ogf",
+		base_texture = "items\\paper.dds",
+		background_color = { red = 238, green = 232, blue = 214 },
+		default_color = { red = 8, green = 8, blue = 8 }
+	},
+	wood = {
+		section = "text_sign_wood",
+		overlay_visual = "dynamics\\text_sign\\text_sign_overlay_wood.ogf",
+		base_texture = "items\\wood.dds",
+		default_color = { red = 18, green = 12, blue = 8 }
+	},
+	board_green = {
+		section = "text_sign_board_green",
+		overlay_visual = "dynamics\\text_sign\\text_sign_overlay_board_green.ogf",
+		base_texture = "items\\board_green.dds",
+		default_color = { red = 245, green = 245, blue = 245 }
+	},
+	board_black = {
+		section = "text_sign_board_black",
+		overlay_visual = "dynamics\\text_sign\\text_sign_overlay_board_black.ogf",
+		base_texture = "items\\board_black.dds",
+		default_color = { red = 245, green = 245, blue = 245 }
+	},
+	graffiti = {
+		section = "text_sign_graffiti",
+		overlay_visual = "dynamics\\text_sign\\text_sign_overlay_graffiti.ogf",
+		base_texture = "items\\graffiti.dds",
+		default_color = { red = 245, green = 245, blue = 245 },
+		transparent_background = true
+	}
+}
+
+local sign_sections = {}
+for _, material_data in pairs(sign_materials) do sign_sections[material_data.section] = true end
+
+
+local current_sign_id = nil
+local used_slots = {}
+local active_signs = {}
+local pending_initializations = {}
+local pending_renders = {}
+local pending_slot_cleanups = {}
+local pending_variant_compactions = {}
+local pending_destroy_checks = {}
+local pending_network_states = {}
+local pending_network_updates = {}
+local pending_host_settings_requests = {}
+local network_request_counter = 0
+local network_request_times = {}
+local pending_attachment_resets = {}
+local visual_held_slots = {}
+local GUI = nil
+local runtime_slots_registered = false
+local runtime_error_reported = false
+local original_open_interact_gui = nil
+local original_ui_inventory_start = nil
+local ui_inventory_loot_guard_installed = false
+local furniture_advanced_ui_hook_installed = false
+local open_sign_gui = nil
+local text_sign_core_override = "auto"
+local text_sign_core_together = "together"
+local text_sign_core_monolith = "monolith"
+local text_sign_cform_experiment_shift = 0.08
+local text_sign_hold_key = nil
+local text_sign_hold_sign_id = nil
+local text_sign_deferred_loot_object = nil
+local text_sign_deferred_loot_sign_id = nil
+local text_sign_deferred_loot_replaying = false
+local text_sign_use_key_was_down = false
+local text_sign_hold_started_at = nil
+local text_sign_hold_consumed = false
+local text_sign_hold_min_duration = 500
+local reported_text_sign_errors = {}
+
+local function report_text_sign_error(prefix, stage, ...)
+	local fields = {}
+	for index = 1, select("#", ...) do fields[#fields + 1] = tostring(select(index, ...)) end
+	local message = prefix .. " " .. tostring(stage)
+	if #fields > 0 then message = message .. " | " .. table.concat(fields, " | ") end
+	if reported_text_sign_errors[message] then return end
+	reported_text_sign_errors[message] = true
+	if type(printf) == "function" then
+		pcall(printf, "%s", message)
+	elseif type(log) == "function" then
+		pcall(log, message)
+	end
+end
+
+local function report_interaction_error(stage, ...)
+	report_text_sign_error("[Text Sign][F]", stage, ...)
+end
+
+local function report_cform_error(stage, ...)
+	report_text_sign_error("[Text Sign][CForm]", stage, ...)
+end
+
+local function report_storage_retry_exhausted(stage, object_id)
+	report_text_sign_error("[Text Sign][Storage]", "retry_exhausted", "stage=" .. tostring(stage), "object=" .. tostring(object_id))
+end
+
+local function clamp_number(value, minimum, maximum, fallback)
+	value = tonumber(value) or fallback
+	if value < minimum then return minimum end
+	if value > maximum then return maximum end
+	return value
+end
+
+local function normalize_text_size(value)
+	return math.floor(clamp_number(value, sign_text_size_min, sign_text_size_max, sign_text_size_default) + 0.5)
+end
+
+local function normalize_color_channel(value)
+	return math.floor(clamp_number(value, 0, 255, 0) + 0.5)
+end
+
+local function normalize_text_alpha(value)
+	return math.floor(clamp_number(value, sign_text_alpha_min, sign_text_alpha_max, sign_text_alpha_default) + 0.5)
+end
+
+local function normalize_text_color(red, green, blue)
+	if type(red) == "table" then
+		return {
+			red = normalize_color_channel(red.red),
+			green = normalize_color_channel(red.green),
+			blue = normalize_color_channel(red.blue)
+		}
+	end
+	if green ~= nil or blue ~= nil then
+		return {
+			red = normalize_color_channel(red),
+			green = normalize_color_channel(green),
+			blue = normalize_color_channel(blue)
+		}
+	end
+	local parsed_red, parsed_green, parsed_blue = string.match(tostring(red or ""), "^%s*(%d+)%s*,%s*(%d+)%s*,%s*(%d+)%s*$")
+	if parsed_red then return normalize_text_color(parsed_red, parsed_green, parsed_blue) end
+	return { red = 8, green = 8, blue = 8 }
+end
+
+local function text_color_to_string(color)
+	color = normalize_text_color(color)
+	return string.format("%d,%d,%d", color.red, color.green, color.blue)
+end
+
+local function valid_utf8_sequence_length(text, index)
+	local first = string.byte(text, index)
+	if not first then return nil end
+	if first < 0x80 then return 1 end
+	local second = string.byte(text, index + 1)
+	if first >= 0xC2 and first <= 0xDF then
+		return second and second >= 0x80 and second <= 0xBF and 2 or nil
+	end
+	local third = string.byte(text, index + 2)
+	if first >= 0xE0 and first <= 0xEF then
+		if not (second and third and second >= 0x80 and second <= 0xBF and third >= 0x80 and third <= 0xBF) then return nil end
+		if first == 0xE0 and second < 0xA0 then return nil end
+		if first == 0xED and second > 0x9F then return nil end
+		return 3
+	end
+	local fourth = string.byte(text, index + 3)
+	if first >= 0xF0 and first <= 0xF4 then
+		if not (second and third and fourth and second >= 0x80 and second <= 0xBF and third >= 0x80 and third <= 0xBF and fourth >= 0x80 and fourth <= 0xBF) then return nil end
+		if first == 0xF0 and second < 0x90 then return nil end
+		if first == 0xF4 and second > 0x8F then return nil end
+		return 4
+	end
+	return nil
+end
+
+local function trim_valid_utf8_to_byte_limit(text, byte_limit)
+	local index, last_index = 1, 0
+	while index <= #text do
+		local sequence_length = valid_utf8_sequence_length(text, index)
+		if not sequence_length then return nil end
+		local sequence_end = index + sequence_length - 1
+		if sequence_end > byte_limit then return string.sub(text, 1, last_index) end
+		last_index = sequence_end
+		index = sequence_end + 1
+	end
+	return text
+end
+
+local function trim_sign_text(value)
+	local text = tostring(value or "")
+	text = string.gsub(text, "^\239\187\191", "")
+	text = string.gsub(text, "\r\n", "\n")
+	text = string.gsub(text, "\r", "\n")
+	text = string.gsub(text, "[%z\1-\8\11\12\14-\31]", "")
+	if string.len(text) > sign_text_max_length then
+		text = trim_valid_utf8_to_byte_limit(text, sign_text_max_length) or string.sub(text, 1, sign_text_max_length)
+	end
+	return text
+end
+
+local function sign_text_to_input(value)
+	return string.gsub(trim_sign_text(value), "\n", "\\n")
+end
+
+local function sign_text_from_input(value)
+	return trim_sign_text(string.gsub(tostring(value or ""), "\\n", "\n"))
+end
+
+local function changed_text_range(before, after)
+	before = tostring(before or "")
+	after = tostring(after or "")
+	local before_length = string.len(before)
+	local after_length = string.len(after)
+	local prefix_length = 0
+	while prefix_length < before_length and prefix_length < after_length
+		and string.byte(before, prefix_length + 1) == string.byte(after, prefix_length + 1) do
+		prefix_length = prefix_length + 1
+	end
+	local suffix_length = 0
+	while before_length - suffix_length > prefix_length and after_length - suffix_length > prefix_length
+		and string.byte(before, before_length - suffix_length) == string.byte(after, after_length - suffix_length) do
+		suffix_length = suffix_length + 1
+	end
+	return prefix_length, before_length - suffix_length, after_length - suffix_length
+end
+
+local function input_character_count(value)
+	value = tostring(value or "")
+	local count = 0
+	local index = 1
+	while index <= string.len(value) do
+		local sequence_length = valid_utf8_sequence_length(value, index) or 1
+		index = index + sequence_length
+		count = count + 1
+	end
+	return count
+end
+
+local function quantize_half_step(value)
+	return math.floor(value * 2 + 0.5) / 2
+end
+
+local function normalize_dimension(value)
+	return quantize_half_step(clamp_number(value, sign_size_min, sign_size_max, sign_size_default))
+end
+
+local function normalize_offset(value)
+	return quantize_half_step(clamp_number(value, -sign_offset_limit, sign_offset_limit, sign_offset_default))
+end
+
+local function normalize_sizes(data)
+	data = data or {}
+	return {
+		sign_width = normalize_dimension(data.sign_width),
+		sign_height = normalize_dimension(data.sign_height),
+		sign_offset_x = normalize_offset(data.sign_offset_x),
+		sign_offset_y = normalize_offset(data.sign_offset_y),
+		sign_offset_z = normalize_offset(data.sign_offset_z)
+	}
+end
+
+local function material_data(material)
+	return sign_materials[material] or sign_materials.paper
+end
+
+local function material_supports_text_alpha(material)
+	return material_data(material).transparent_background ~= true
+end
+
+local function material_from_section(section)
+	for material, data in pairs(sign_materials) do
+		if data.section == section then return material end
+	end
+	return "paper"
+end
+
+local function default_text_color(material)
+	local color = material_data(material).default_color
+	return { red = color.red, green = color.green, blue = color.blue }
+end
+
+local function normalize_material_color(color, material)
+	if color == nil or color == "" then return default_text_color(material) end
+	if type(color) == "string" and not string.match(color, "^%s*%d+%s*,%s*%d+%s*,%s*%d+%s*$") then
+		return default_text_color(material)
+	end
+	return normalize_text_color(color)
+end
+
+local function overlay_visual(material)
+	return material_data(material).overlay_visual
+end
+
+local function base_texture_path(material)
+	return getFS():update_path("$textures$", material_data(material).base_texture)
+end
+
+local function slot_name(slot)
+	return string.format("%03d", math.floor(tonumber(slot) or 0))
+end
+
+local function normalize_slot(slot)
+	slot = tonumber(slot)
+	if not slot then return nil end
+	slot = math.floor(slot)
+	if slot < 0 or slot >= sign_texture_slots then return nil end
+	return slot
+end
+
+local function slot_key(slot)
+	return "sign_" .. slot_name(slot)
+end
+
+local function font_runtime()
+	local ok, runtime = pcall(function() return text_sign_font_runtime end)
+	if ok and type(runtime) == "table" then return runtime end
+	return nil
+end
+
+local function register_runtime_slots()
+	if runtime_slots_registered then return true end
+	local runtime = font_runtime()
+	if not (runtime and runtime.register_slot and runtime.is_ready and runtime.is_ready()) then
+		return false
+	end
+	for slot = 0, sign_texture_slots - 1 do
+		local prefix = "textures\\dynamic\\tz" .. slot_name(slot) .. "_"
+		local texture = "dynamic\\tz" .. slot_name(slot) .. "_"
+		runtime.register_slot(slot_key(slot), prefix, texture)
+	end
+	runtime_slots_registered = true
+	return true
+end
+
+local function object_material(object_id)
+	local object = nil
+	if object_id and level and type(level.object_by_id) == "function" then
+		local object_ok, resolved_object = pcall(level.object_by_id, object_id)
+		if object_ok then object = resolved_object end
+	end
+	if object then
+		local ok, section = pcall(function() return object:section() end)
+		if ok then return material_from_section(section) end
+	end
+	local server_object = nil
+	if object_id and type(alife_object) == "function" then
+		local server_ok, resolved_server_object = pcall(alife_object, object_id)
+		if server_ok then server_object = resolved_server_object end
+	end
+	if server_object then
+		local ok, section = pcall(function() return server_object:section_name() end)
+		if ok then return material_from_section(section) end
+	end
+	return "paper"
+end
+
+local function normalize_sign_data(data, material)
+	data = data or {}
+	material = material or data.sign_material or "paper"
+	local sizes = normalize_sizes(data)
+	local color = normalize_material_color(data.sign_text_color, material)
+	local font_family = tostring(data.sign_font_family or "")
+	local font_variant = tostring(data.sign_font_variant or "")
+	if font_family == "" then font_family = default_font_family end
+	if font_variant == "" then font_variant = default_font_variant end
+	local family, variant = string.sub(font_family, 1, 256), string.sub(font_variant, 1, 256)
+	return {
+		sign_text = trim_sign_text(data.sign_text),
+		sign_slot = normalize_slot(data.sign_slot),
+		sign_text_color = { red = color.red, green = color.green, blue = color.blue },
+		sign_text_alpha = material_supports_text_alpha(material) and normalize_text_alpha(data.sign_text_alpha) or sign_text_alpha_default,
+		sign_text_size = normalize_text_size(data.sign_text_size),
+		sign_font_family = family,
+		sign_font_variant = variant,
+		sign_width = sizes.sign_width,
+		sign_height = sizes.sign_height,
+		sign_offset_x = sizes.sign_offset_x,
+		sign_offset_y = sizes.sign_offset_y,
+		sign_offset_z = sizes.sign_offset_z,
+		sign_material = material,
+		sign_cform_experiment_shift = tonumber(data.sign_cform_experiment_shift) or 0
+	}
+end
+
+local function settings_signature(data)
+	data = data or {}
+	return table.concat({
+		data.sign_text, tostring(data.sign_text_size),
+		data.sign_font_family, data.sign_font_variant, text_color_to_string(data.sign_text_color), material_supports_text_alpha(data.sign_material) and tostring(data.sign_text_alpha) or "opaque",
+		tostring(data.sign_width), tostring(data.sign_height),
+		tostring(data.sign_offset_x), tostring(data.sign_offset_y), tostring(data.sign_offset_z),
+		tostring(data.sign_material)
+	}, "|")
+end
+
+local function read_object_sign_storage(object_id)
+	if not (hf_obj_manager and type(hf_obj_manager.get_data) == "function") then return nil, false end
+	local data_ok, object_data = pcall(hf_obj_manager.get_data, object_id)
+	if not data_ok or object_data == false then return nil, false end
+	return object_data, true
+end
+
+local function read_object_sign_data(object_id)
+	local object_data, read_ok = read_object_sign_storage(object_id)
+	if not read_ok then return nil, false end
+	if type(object_data) ~= "table" then return nil, true end
+	local raw = object_data[sign_data_key]
+	if type(raw) ~= "table" then return nil, true end
+	local data = {}
+	for key, value in pairs(raw) do data[key] = value end
+	return data, true
+end
+
+local function write_object_sign_data(object_id, data)
+	if not (hf_obj_manager and type(hf_obj_manager.set_data) == "function" and type(hf_obj_manager.update_data) == "function") then
+		return false
+	end
+	local object_data, read_ok = read_object_sign_storage(object_id)
+	if not read_ok then return false end
+	if type(object_data) ~= "table" then
+		local set_ok, set_result = pcall(hf_obj_manager.set_data, object_id, {})
+		if not set_ok or set_result == false then return false end
+	end
+	data = normalize_sign_data(data, data and data.sign_material or object_material(object_id))
+	local stored_data = {
+		sign_text = data.sign_text,
+		sign_slot = data.sign_slot,
+		sign_text_color = { red = data.sign_text_color.red, green = data.sign_text_color.green, blue = data.sign_text_color.blue },
+		sign_text_size = data.sign_text_size,
+		sign_font_family = data.sign_font_family,
+		sign_font_variant = data.sign_font_variant,
+		sign_width = data.sign_width,
+		sign_height = data.sign_height,
+		sign_offset_x = data.sign_offset_x,
+		sign_offset_y = data.sign_offset_y,
+		sign_offset_z = data.sign_offset_z
+	}
+	if material_supports_text_alpha(data.sign_material) then stored_data.sign_text_alpha = data.sign_text_alpha end
+	object_data = type(object_data) == "table" and object_data or {}
+	object_data[sign_data_key] = stored_data
+	local update_ok, update_result = pcall(hf_obj_manager.set_data, object_id, object_data)
+	return update_ok and update_result ~= false
+end
+
+local function get_object_sign_data(object_id)
+	local object_data, read_ok = read_object_sign_storage(object_id)
+	if not read_ok then return nil, false end
+	local raw = type(object_data) == "table" and object_data[sign_data_key] or nil
+	local data = {}
+	if type(raw) == "table" then
+		for key, value in pairs(raw) do data[key] = value end
+	end
+	data.sign_cform_experiment_shift = type(object_data) == "table" and tonumber(object_data.text_sign_cform_experiment_shift) or 0
+	return normalize_sign_data(data, object_material(object_id)), true
+end
+
+local function game_object_by_id(object_id)
+	object_id = tonumber(object_id)
+	if not object_id then return nil end
+	if level and level.object_by_id then
+		local ok, object = pcall(function() return level.object_by_id(object_id) end)
+		if ok and object then return object end
+	end
+	if get_object_by_id then
+		local ok, object = pcall(function() return get_object_by_id(object_id) end)
+		if ok and object then return object end
+	end
+	return nil
+end
+
+local function active_text_sign_core()
+	if text_sign_core_override == text_sign_core_together then return text_sign_core_together end
+	if text_sign_core_override == text_sign_core_monolith then return text_sign_core_monolith end
+	local together_ok, together = pcall(function() return IIsHost end)
+	if together_ok and type(together) == "function" then return text_sign_core_together end
+	return text_sign_core_monolith
+end
+
+local function uses_together_core()
+	return active_text_sign_core() == text_sign_core_together
+end
+
+local function remove_sign_attachment(object)
+	if not object then return false end
+	local get_ok, attachment = pcall(function() return object:get_attachment(sign_attachment_name) end)
+	if not get_ok then return false end
+	if not attachment then return true end
+	local remove_ok, remove_result = pcall(function() return object:remove_attachment(sign_attachment_name) end)
+	if not remove_ok or remove_result == false then return false end
+	local verify_ok, remaining_attachment = pcall(function() return object:get_attachment(sign_attachment_name) end)
+	return verify_ok and not remaining_attachment
+end
+
+local function ensure_sign_attachment(object, data)
+	if not object then return nil end
+	local attachment = nil
+	pcall(function() attachment = object:get_attachment(sign_attachment_name) end)
+	if not attachment then
+		local ok, created = pcall(function()
+			return object:add_attachment(sign_attachment_name, overlay_visual(data.sign_material))
+		end)
+		if ok then attachment = created end
+	end
+	if not attachment then
+		return nil
+	end
+	pcall(function() attachment:set_type(script_attachment_type.World) end)
+	if uses_together_core() then
+		pcall(function() attachment:bone_callback(0, 0, true) end)
+	else
+		pcall(function()
+			attachment:bone_callback(0, function()
+				local identity = matrix()
+				identity:identity()
+				return identity
+			end, true)
+		end)
+	end
+	return attachment
+end
+
+local function get_sign_geometry(data)
+	local sizes = normalize_sizes(data)
+	local scale_x = sizes.sign_width / sign_size_default
+	local scale_z = sizes.sign_height / sign_size_default
+	local position_x = sign_half * sizes.sign_offset_x / sign_size_scale_reference
+	local position_y = sign_surface_offset_y + sign_half * sizes.sign_offset_y / sign_size_scale_reference
+	local position_z = sign_half * sizes.sign_offset_z / sign_size_scale_reference
+	local physical_shift = tonumber(data and data.sign_cform_experiment_shift) or 0
+	if uses_together_core() then
+		return { scale_x = scale_x, scale_z = scale_z, position_x = position_x, position_y = position_y + physical_shift, position_z = position_z }
+	end
+	return { scale_x = scale_z, scale_z = scale_x, position_x = position_z, position_y = -position_y - physical_shift, position_z = position_x }
+end
+
+local function apply_attachment_transform(attachment, data)
+	if not attachment then return false end
+	local geometry = get_sign_geometry(data)
+	local scale_ok = pcall(function() attachment:set_scale(geometry.scale_x, 1, geometry.scale_z) end)
+	local position_ok = pcall(function() attachment:set_position(geometry.position_x, geometry.position_y, geometry.position_z) end)
+	return scale_ok and position_ok
+end
+
+local function apply_sign_surface(object_id, data, texture_name, reset_texture)
+	local object = game_object_by_id(object_id)
+	if not object then
+		return false
+	end
+	if reset_texture and not remove_sign_attachment(object) then return false end
+	local attachment = ensure_sign_attachment(object, data)
+	if not attachment then
+		return false
+	end
+	if not apply_attachment_transform(attachment, data) then
+		return false
+	end
+	if texture_name then
+		local shader_slot = uses_together_core() and 1 or 0
+		local texture_ok = pcall(function() attachment:set_shader(shader_slot, nil, texture_name) end)
+		if not texture_ok then return false end
+	end
+	return true
+end
+
+local function object_exists(object_id)
+	object_id = tonumber(object_id)
+	if object_id == nil then return false end
+	local ok, object = pcall(function() return alife_object(object_id) end)
+	return ok and object ~= nil
+end
+
+local function current_time_ms()
+	return time_global and time_global() or 0
+end
+
+local function sorted_numeric_keys(values)
+	local keys = {}
+	for key in pairs(values or {}) do
+		key = tonumber(key)
+		if key then keys[#keys + 1] = key end
+	end
+	table.sort(keys)
+	return keys
+end
+
+local function slot_owner(slot)
+	local object_id = used_slots[slot]
+	if object_id and not object_exists(object_id) then
+		used_slots[slot], object_id = nil, nil
+		pending_slot_cleanups[slot] = current_time_ms() + released_slot_cleanup_delay
+	end
+	return object_id
+end
+
+local function reserve_slot(object_id, slot)
+	slot = normalize_slot(slot)
+	if object_id and slot ~= nil then
+		used_slots[slot] = object_id
+		pending_slot_cleanups[slot] = nil
+	end
+end
+
+local function release_slot(object_id, slot)
+	slot = normalize_slot(slot)
+	if slot ~= nil and (not used_slots[slot] or used_slots[slot] == object_id) then
+		used_slots[slot] = nil
+		pending_slot_cleanups[slot] = current_time_ms() + released_slot_cleanup_delay
+		pending_variant_compactions[slot] = nil
+	end
+	pending_renders[object_id] = nil
+end
+
+local function hold_visual_slot(object_id, slot)
+	slot = normalize_slot(slot)
+	if slot == nil or not object_id then return end
+	visual_held_slots[object_id] = visual_held_slots[object_id] or {}
+	visual_held_slots[object_id][slot] = true
+	reserve_slot(object_id, slot)
+end
+
+local function pending_attachment_reset_slot(object_id)
+	local held_slots = visual_held_slots[object_id]
+	if type(held_slots) ~= "table" then return nil end
+	for slot in pairs(held_slots) do return normalize_slot(slot) end
+	return nil
+end
+
+local function release_visual_slots(object_id, keep_slot)
+	keep_slot = normalize_slot(keep_slot)
+	local held_slots = visual_held_slots[object_id]
+	if type(held_slots) ~= "table" then return end
+	for slot in pairs(held_slots) do
+		if normalize_slot(slot) ~= keep_slot then release_slot(object_id, slot) end
+	end
+	visual_held_slots[object_id] = nil
+end
+
+local function cancel_pending_attachment_reset(object_id)
+	pending_attachment_resets[object_id] = nil
+end
+
+local function queue_attachment_reset(object_id, data, slot, attempts)
+	local existing = pending_attachment_resets[object_id]
+	hold_visual_slot(object_id, slot)
+	pending_attachment_resets[object_id] = {
+		data = data,
+		attempts = tonumber(attempts) or (type(existing) == "table" and tonumber(existing.attempts)) or 1,
+		ready_time = current_time_ms() + storage_retry_delay
+	}
+end
+
+local function process_pending_attachment_reset(object_id)
+	local pending = pending_attachment_resets[object_id]
+	if type(pending) ~= "table" or type(pending.data) ~= "table" then return end
+	if (tonumber(pending.ready_time) or 0) > current_time_ms() then return end
+	local current_data, current_read_ok = get_object_sign_data(object_id)
+	if not current_read_ok or not current_data then
+		local attempts = (tonumber(pending.attempts) or 1) + 1
+		if attempts >= storage_retry_limit then
+			cancel_pending_attachment_reset(object_id)
+			report_storage_retry_exhausted("attachment_reset", object_id)
+		else
+			pending.attempts = attempts
+			pending.ready_time = current_time_ms() + storage_retry_delay
+		end
+		return
+	end
+	if current_data.sign_text ~= "" then
+		cancel_pending_attachment_reset(object_id)
+		return
+	end
+	if apply_sign_surface(object_id, pending.data, nil, true) then
+		release_visual_slots(object_id)
+		cancel_pending_attachment_reset(object_id)
+		return
+	end
+	local attempts = (tonumber(pending.attempts) or 1) + 1
+	if attempts >= storage_retry_limit then
+		cancel_pending_attachment_reset(object_id)
+		report_storage_retry_exhausted("attachment_reset", object_id)
+		return
+	end
+	pending.attempts = attempts
+	pending.ready_time = current_time_ms() + storage_retry_delay
+end
+
+local function process_slot_cleanups()
+	local now = current_time_ms()
+	for object_id, pending in pairs(pending_destroy_checks) do
+		if now >= pending.ready_time then
+			if object_exists(object_id) then
+				reserve_slot(object_id, pending.slot)
+			else
+				release_slot(object_id, pending.slot)
+			end
+			pending_destroy_checks[object_id] = nil
+		end
+	end
+	local runtime = font_runtime()
+	local compact_slot = runtime and runtime.compact_slot
+	if type(compact_slot) == "function" then
+		for slot, ready_time in pairs(pending_variant_compactions) do
+			if not slot_owner(slot) then
+				pending_variant_compactions[slot] = nil
+			elseif now >= ready_time then
+				local ok, compacted = pcall(compact_slot, slot_key(slot))
+				if ok and compacted then
+					pending_variant_compactions[slot] = nil
+				else
+					pending_variant_compactions[slot] = now + 1000
+				end
+			end
+		end
+	end
+	local clear_slot = runtime and runtime.clear_slot
+	if type(clear_slot) ~= "function" then return end
+	for slot, ready_time in pairs(pending_slot_cleanups) do
+		if slot_owner(slot) then
+			pending_slot_cleanups[slot] = nil
+		elseif now >= ready_time then
+			local ok, cleared = pcall(clear_slot, slot_key(slot))
+			if ok and cleared then
+				pending_slot_cleanups[slot] = nil
+			else
+				pending_slot_cleanups[slot] = now + 1000
+			end
+		end
+	end
+end
+
+local function reset_runtime_slots()
+	if not register_runtime_slots() then return false end
+	local runtime = font_runtime()
+	local reset_slots = runtime and runtime.reset_slots
+	if type(reset_slots) ~= "function" then
+		return false
+	end
+	local ok, reset = pcall(reset_slots)
+	return ok and reset == true
+end
+
+local function allocate_slot(object_id, current_slot)
+	current_slot = normalize_slot(current_slot)
+	if current_slot ~= nil and (not slot_owner(current_slot) or used_slots[current_slot] == object_id) then
+		reserve_slot(object_id, current_slot)
+		return current_slot
+	end
+
+	for slot = 0, sign_texture_slots - 1 do
+		if not slot_owner(slot) and not pending_slot_cleanups[slot] then
+			reserve_slot(object_id, slot)
+			return slot
+		end
+	end
+
+	for slot = 0, sign_texture_slots - 1 do
+		if not slot_owner(slot) then
+			reserve_slot(object_id, slot)
+			return slot
+		end
+	end
+
+	return nil
+end
+
+local function show_slot_limit_message()
+	if print_msg then print_msg(string.format("Text sign limit reached: %d signs", sign_texture_slots)) end
+end
+
+local function queue_render(object_id, data)
+	data = normalize_sign_data(data, data and data.sign_material)
+	local slot = data.sign_slot
+	if not slot then
+		return
+	end
+	pending_renders[object_id] = {
+		signature = settings_signature(data),
+		data = data,
+		storage_attempts = 0,
+		surface_apply_attempts = 0,
+		confirmation_attempts = 0,
+		ready_time = 0
+	}
+end
+
+local function process_pending_render(object_id)
+	local pending = pending_renders[object_id]
+	if not pending then
+		return
+	end
+	if (tonumber(pending.ready_time) or 0) > current_time_ms() then return end
+	if not register_runtime_slots() then
+		pending_renders[object_id] = nil
+		if not runtime_error_reported then
+			runtime_error_reported = true
+			if print_msg then print_msg("Text sign FreeType runtime is unavailable") end
+		end
+		return
+	end
+	local data = pending.data
+	local slot = normalize_slot(data.sign_slot)
+	if slot == nil then
+		pending_renders[object_id] = nil
+		return
+	end
+	local runtime = font_runtime()
+	local texture_name = pending.texture_name
+	if not texture_name then
+		local render_slot = runtime and runtime.render_slot
+		if type(render_slot) ~= "function" then
+			pending_renders[object_id] = nil
+			return
+		end
+		local render_request = {
+			text = data.sign_text,
+			font_family = data.sign_font_family,
+			font_variant = data.sign_font_variant,
+			size_percent = data.sign_text_size,
+			sign_width = data.sign_width,
+			sign_height = data.sign_height,
+			color = data.sign_text_color,
+			base_texture_path = base_texture_path(data.sign_material),
+			background_color = material_data(data.sign_material).background_color,
+			transparent_background = material_data(data.sign_material).transparent_background == true,
+		}
+		if material_supports_text_alpha(data.sign_material) then render_request.text_alpha = data.sign_text_alpha end
+		local ok, ready, rendered_texture_name = pcall(render_slot, slot_key(slot), render_request)
+		if not ok then
+			report_text_sign_error("[Text Sign][Render]", "runtime_failed", "object=" .. tostring(object_id), "slot=" .. tostring(slot), "error=" .. tostring(ready))
+			pending_renders[object_id] = nil
+			return
+		end
+		if ready == nil then
+			pending_renders[object_id] = nil
+			return
+		end
+		if ready ~= true then
+			return
+		end
+		texture_name = rendered_texture_name
+		pending.texture_name = texture_name
+	end
+	local current_data, current_read_ok = get_object_sign_data(object_id)
+	if not current_read_ok or not current_data then
+		local attempts = (tonumber(pending.storage_attempts) or 0) + 1
+		if attempts >= storage_retry_limit then
+			pending_renders[object_id] = nil
+			report_storage_retry_exhausted("pending_render", object_id)
+		else
+			pending.storage_attempts = attempts
+			pending.ready_time = current_time_ms() + storage_retry_delay
+		end
+		return
+	end
+	if settings_signature(current_data) ~= pending.signature or current_data.sign_slot ~= data.sign_slot then
+		pending_renders[object_id] = nil
+		return
+	end
+	if not apply_sign_surface(object_id, data, texture_name, false) then
+		local attempts = (tonumber(pending.surface_apply_attempts) or 0) + 1
+		if attempts >= storage_retry_limit then
+			pending_renders[object_id] = nil
+			report_text_sign_error("[Text Sign][Render]", "surface_apply_retry_exhausted", "object=" .. tostring(object_id), "slot=" .. tostring(slot))
+		else
+			pending.surface_apply_attempts = attempts
+			pending.ready_time = current_time_ms() + storage_retry_delay
+		end
+		return
+	end
+	local confirm_slot_texture = runtime and runtime.confirm_slot_texture
+	local confirmation_ok, confirmed = false, false
+	if type(confirm_slot_texture) == "function" then
+		confirmation_ok, confirmed = pcall(confirm_slot_texture, slot_key(slot), texture_name)
+	end
+	if not confirmation_ok or confirmed ~= true then
+		local attempts = (tonumber(pending.confirmation_attempts) or 0) + 1
+		if attempts >= storage_retry_limit then
+			pending_renders[object_id] = nil
+			report_text_sign_error("[Text Sign][Render]", "texture_confirmation_retry_exhausted", "object=" .. tostring(object_id), "slot=" .. tostring(slot))
+		else
+			pending.confirmation_attempts = attempts
+			pending.ready_time = current_time_ms() + storage_retry_delay
+		end
+		return
+	end
+	reserve_slot(object_id, slot)
+	release_visual_slots(object_id, slot)
+	pending_variant_compactions[slot] = current_time_ms() + released_slot_cleanup_delay
+	pending_renders[object_id] = nil
+end
+
+local function apply_object_settings(object_id, text, text_size, sizes, text_color, text_alpha, font_family, font_variant)
+	if not object_id then return false, "read_failed" end
+	local current_data, current_read_ok = get_object_sign_data(object_id)
+	if not current_read_ok or not current_data then return false, "read_failed" end
+	local previous_slot = current_data.sign_slot
+	local data = normalize_sign_data({
+		sign_text = text,
+		sign_text_size = text_size,
+		sign_text_color = text_color or current_data.sign_text_color,
+		sign_text_alpha = text_alpha,
+		sign_font_family = font_family,
+		sign_font_variant = font_variant,
+		sign_width = sizes and sizes.sign_width,
+		sign_height = sizes and sizes.sign_height,
+		sign_offset_x = sizes and sizes.sign_offset_x,
+		sign_offset_y = sizes and sizes.sign_offset_y,
+		sign_offset_z = sizes and sizes.sign_offset_z,
+		sign_cform_experiment_shift = current_data.sign_cform_experiment_shift
+	}, current_data.sign_material)
+	local needs_slot = data.sign_text ~= ""
+	if not needs_slot then
+		data.sign_slot = nil
+		if not write_object_sign_data(object_id, data) then return false, "write_failed" end
+		hold_visual_slot(object_id, previous_slot)
+		if apply_sign_surface(object_id, data, nil, true) then
+			release_visual_slots(object_id)
+			return true
+		end
+		queue_attachment_reset(object_id, data, previous_slot, 1)
+		return true, "attachment_pending"
+	end
+	local held_slot = pending_attachment_reset_slot(object_id)
+	local allocation_previous_slot = previous_slot or held_slot
+	local slot = allocate_slot(object_id, allocation_previous_slot)
+	if slot == nil then
+		show_slot_limit_message()
+		return false, "slot_unavailable"
+	end
+	data.sign_slot = slot
+	if not write_object_sign_data(object_id, data) then
+		if slot ~= allocation_previous_slot then release_slot(object_id, slot) end
+		return false, "write_failed"
+	end
+	if held_slot == slot then cancel_pending_attachment_reset(object_id) end
+	apply_sign_surface(object_id, data, nil, false)
+	queue_render(object_id, data)
+	return true
+end
+
+local function refresh_object_visual(object_id)
+	local data, data_read_ok = get_object_sign_data(object_id)
+	if not data_read_ok or not data then return false, "read_failed" end
+	local needs_slot = data.sign_text ~= ""
+	local previous_slot = data.sign_slot
+	if not needs_slot then
+		data.sign_slot = nil
+		if not write_object_sign_data(object_id, data) then return false, "write_failed" end
+		hold_visual_slot(object_id, previous_slot)
+		if apply_sign_surface(object_id, data, nil, true) then
+			release_visual_slots(object_id)
+			return true
+		end
+		queue_attachment_reset(object_id, data, previous_slot, 1)
+		return true, "attachment_pending"
+	end
+	local held_slot = pending_attachment_reset_slot(object_id)
+	local allocation_previous_slot = previous_slot or held_slot
+	local slot = allocate_slot(object_id, allocation_previous_slot)
+	if slot == nil then
+		show_slot_limit_message()
+		apply_sign_surface(object_id, data, nil, true)
+		return false, "slot_unavailable"
+	end
+	data.sign_slot = slot
+	if not write_object_sign_data(object_id, data) then
+		if slot ~= allocation_previous_slot then release_slot(object_id, slot) end
+		return false, "write_failed"
+	end
+	if held_slot == slot then cancel_pending_attachment_reset(object_id) end
+	apply_sign_surface(object_id, data, nil, true)
+	queue_render(object_id, data)
+	return true
+end
+
+local function network_is_host()
+	local ok, is_host = pcall(function() return IIsHost() end)
+	return ok and is_host == true
+end
+
+local function network_is_available()
+	local action_ok, action = pcall(function() return OnICustomScriptAction end)
+	local serializer_ok, serializer = pcall(function() return ISerialize end)
+	return uses_together_core() and action_ok and type(action) == "function" and serializer_ok and type(serializer) == "function"
+end
+
+local function network_server_id(object_id)
+	return tonumber(object_id)
+end
+
+local function network_local_id(server_id)
+	server_id = tonumber(server_id)
+	if not server_id then return nil end
+	local object = game_object_by_id(server_id)
+	if not object then return nil end
+	local section_ok, section = pcall(function() return object:section() end)
+	return section_ok and sign_sections[section] and server_id or nil
+end
+
+local function send_network_action(function_name, payload, send_to_host)
+	if not uses_together_core() then return false end
+	local serializer_ok, serializer = pcall(function() return ISerialize end)
+	if not serializer_ok or type(serializer) ~= "function" then return false end
+	local payload_ok, serialized = pcall(serializer, payload)
+	if not payload_ok or type(serialized) ~= "string" then return false end
+	local send_ok = pcall(function()
+		OnICustomScriptAction("text_sign", function_name, serialized, send_to_host == true)
+	end)
+	return send_ok
+end
+
+local function network_state_from_data(object_id, data)
+	local server_id = network_server_id(object_id)
+	if not server_id then return nil end
+	if not data then
+		local current_data, current_read_ok = get_object_sign_data(object_id)
+		if not current_read_ok then return nil end
+		data = current_data
+	end
+	local state = {
+		server_id = server_id,
+		sign_text = data.sign_text,
+		sign_text_size = data.sign_text_size,
+		sign_font_family = data.sign_font_family,
+		sign_font_variant = data.sign_font_variant,
+		sign_text_color = { red = data.sign_text_color.red, green = data.sign_text_color.green, blue = data.sign_text_color.blue },
+		sign_width = data.sign_width,
+		sign_height = data.sign_height,
+		sign_offset_x = data.sign_offset_x,
+		sign_offset_y = data.sign_offset_y,
+		sign_offset_z = data.sign_offset_z
+	}
+	if material_supports_text_alpha(data.sign_material) then state.sign_text_alpha = data.sign_text_alpha end
+	return state
+end
+
+local function queue_authoritative_state_retry(server_id, state, attempts)
+	if not server_id or type(state) ~= "table" then return end
+	attempts = tonumber(attempts) or 1
+	if attempts >= storage_retry_limit then
+		pending_network_states[server_id] = nil
+		report_storage_retry_exhausted("authoritative_state", server_id)
+		return
+	end
+	pending_network_states[server_id] = {
+		state = state,
+		attempts = attempts,
+		ready_time = current_time_ms() + storage_retry_delay
+	}
+end
+
+local function apply_network_state(state, attempts)
+	if type(state) ~= "table" then return false end
+	attempts = tonumber(attempts) or 1
+	local server_id = tonumber(state.server_id)
+	if not server_id then return false end
+	local object_id = network_local_id(server_id)
+	if not object_id then
+		queue_authoritative_state_retry(server_id, state, attempts)
+		return false
+	end
+
+	local current_data, current_read_ok = get_object_sign_data(object_id)
+	if not current_read_ok or not current_data then
+		queue_authoritative_state_retry(server_id, state, attempts)
+		return false
+	end
+	local local_update = pending_network_updates[object_id]
+	local acknowledged_local_update = false
+	if not network_is_host() and type(local_update) == "table" and type(local_update.data) == "table" then
+		if state.request_token and state.request_token == local_update.request_token and local_update.awaiting_authority then
+			acknowledged_local_update = true
+		else
+			return false
+		end
+	end
+	local previous_slot = nil
+	for slot, owner in pairs(used_slots) do
+		if owner == object_id then previous_slot = slot break end
+	end
+	local data = normalize_sign_data({
+		sign_text = state.sign_text,
+		sign_slot = previous_slot,
+		sign_text_size = state.sign_text_size,
+		sign_font_family = state.sign_font_family,
+		sign_font_variant = state.sign_font_variant,
+		sign_text_color = state.sign_text_color,
+		sign_text_alpha = state.sign_text_alpha,
+		sign_width = state.sign_width,
+		sign_height = state.sign_height,
+		sign_offset_x = state.sign_offset_x,
+		sign_offset_y = state.sign_offset_y,
+		sign_offset_z = state.sign_offset_z,
+		sign_cform_experiment_shift = current_data.sign_cform_experiment_shift
+	}, current_data.sign_material)
+
+	if acknowledged_local_update and settings_signature(current_data) == settings_signature(data)
+		and current_data.sign_slot == previous_slot then
+		pending_network_updates[object_id] = nil
+		pending_network_states[server_id] = nil
+		return true
+	end
+
+	local slot = data.sign_text ~= "" and allocate_slot(object_id, previous_slot) or nil
+	data.sign_slot = slot
+	if not write_object_sign_data(object_id, data) then
+		queue_authoritative_state_retry(server_id, state, attempts)
+		return false
+	end
+	if acknowledged_local_update then pending_network_updates[object_id] = nil end
+	if slot == nil then
+		hold_visual_slot(object_id, previous_slot)
+		if apply_sign_surface(object_id, data, nil, true) then
+			release_visual_slots(object_id)
+			cancel_pending_attachment_reset(object_id)
+		else
+			queue_attachment_reset(object_id, data, previous_slot, 1)
+		end
+	else
+		if previous_slot ~= slot then hold_visual_slot(object_id, previous_slot) end
+		cancel_pending_attachment_reset(object_id)
+		reserve_slot(object_id, slot)
+		if apply_sign_surface(object_id, data, nil, true) then release_visual_slots(object_id, slot) end
+		queue_render(object_id, data)
+	end
+
+	pending_network_states[server_id] = nil
+	return true
+end
+
+local function broadcast_object_state(object_id, request_token)
+	local state = network_state_from_data(object_id)
+	if not state then return false end
+	state.request_token = request_token
+	return send_network_action("receive_authoritative_state", state, false)
+end
+
+local function send_settings_request(object_id, data, request_token)
+	local request = network_state_from_data(object_id, data)
+	if not request then return false end
+	request.request_token = request_token
+	return send_network_action("receive_settings_request", request, true)
+end
+
+local function queue_network_update(object_id, attempts)
+	if not object_id or not uses_together_core() then return end
+	local data, read_ok = get_object_sign_data(object_id)
+	if not read_ok or not data then return end
+	network_request_counter = network_request_counter + 1
+	local actor_ok, actor_id = pcall(function() return db.actor:id() end)
+	pending_network_updates[object_id] = {
+		data = data,
+		request_token = tostring(actor_ok and actor_id or "unknown") .. ":" .. tostring(current_time_ms()) .. ":" .. tostring(network_request_counter),
+		attempts = tonumber(attempts) or 0,
+		awaiting_authority = false,
+		ready_time = current_time_ms() + network_update_delay
+	}
+end
+
+local function process_pending_network_updates()
+	if not network_is_available() then return end
+	local now = current_time_ms()
+	for object_id, pending in pairs(pending_network_updates) do
+		if type(pending) ~= "table" or type(pending.data) ~= "table" then
+			pending_network_updates[object_id] = nil
+		elseif not object_exists(object_id) then
+			pending_network_updates[object_id] = nil
+		elseif pending.awaiting_authority and (tonumber(pending.ready_time) or 0) <= now then
+			pending.attempts = (tonumber(pending.attempts) or 0) + 1
+			if pending.attempts >= storage_retry_limit then
+				pending_network_updates[object_id] = nil
+				report_storage_retry_exhausted("network_confirmation", object_id)
+			else
+				pending.awaiting_authority = false
+				pending.ready_time = now
+			end
+		end
+		if pending_network_updates[object_id] == pending and not pending.awaiting_authority and (tonumber(pending.ready_time) or 0) <= now then
+			local is_host = network_is_host()
+			local sent
+			if is_host then
+				sent = broadcast_object_state(object_id)
+			else
+				sent = send_settings_request(object_id, pending.data, pending.request_token)
+			end
+			if sent then
+				if is_host then
+					pending_network_updates[object_id] = nil
+				else
+					pending.awaiting_authority = true
+					pending.ready_time = now + network_update_delay
+				end
+			else
+				local attempts = (tonumber(pending.attempts) or 0) + 1
+				pending.attempts = attempts
+				if attempts >= storage_retry_limit then
+					pending_network_updates[object_id] = nil
+					report_storage_retry_exhausted("network_update", object_id)
+				else
+					pending.ready_time = now + storage_retry_delay
+				end
+			end
+		end
+	end
+end
+
+local function submit_object_settings(object_id, text, text_size, sizes, text_color, text_alpha, font_family, font_variant)
+	local applied = apply_object_settings(object_id, text, text_size, sizes, text_color, text_alpha, font_family, font_variant)
+	if applied then
+		queue_network_update(object_id)
+	end
+	return applied
+end
+
+local function queue_host_settings_request(object_id, request, attempts)
+	pending_host_settings_requests[object_id] = {
+		request = request,
+		attempts = tonumber(attempts) or 1,
+		ready_time = current_time_ms() + storage_retry_delay
+	}
+end
+
+local function process_pending_host_settings_request(object_id)
+	local pending = pending_host_settings_requests[object_id]
+	if type(pending) ~= "table" or type(pending.request) ~= "table" then return end
+	if (tonumber(pending.ready_time) or 0) > current_time_ms() then return end
+	local request = pending.request
+	local applied, apply_reason = apply_object_settings(object_id, request.sign_text, request.sign_text_size, request,
+		request.sign_text_color, request.sign_text_alpha, request.sign_font_family, request.sign_font_variant)
+	if applied then
+		pending_host_settings_requests[object_id] = nil
+		if not broadcast_object_state(object_id, request.request_token) then queue_network_update(object_id) end
+		return
+	end
+	if apply_reason ~= "read_failed" and apply_reason ~= "write_failed" then
+		pending_host_settings_requests[object_id] = nil
+		if not broadcast_object_state(object_id, request.request_token) then queue_network_update(object_id) end
+		return
+	end
+	local attempts = (tonumber(pending.attempts) or 1) + 1
+	if attempts >= storage_retry_limit then
+		pending_host_settings_requests[object_id] = nil
+		report_storage_retry_exhausted("host_settings_request", object_id)
+		return
+	end
+	pending.attempts = attempts
+	pending.ready_time = current_time_ms() + storage_retry_delay
+end
+
+function receive_settings_request(request)
+	if not network_is_host() or type(request) ~= "table" then return end
+	local object_id = network_local_id(request.server_id)
+	if not object_id then return end
+	if type(request.request_token) ~= "string" or #request.request_token > 100 then return end
+	local sender_ok, sender = pcall(function() return CoopManager:RpcSender() end)
+	if not sender_ok or not sender then return end
+	local valid_ok, sender_id = pcall(function() return sender:id() end)
+	if not valid_ok or not sender_id then return end
+	local now = current_time_ms()
+	local object_requests = network_request_times[object_id] or {}
+	local last_request = object_requests[sender_id]
+	if last_request and now - last_request < 250 then return end
+	object_requests[sender_id] = now
+	network_request_times[object_id] = object_requests
+	local applied, apply_reason = apply_object_settings(object_id, request.sign_text, request.sign_text_size, request,
+		request.sign_text_color, request.sign_text_alpha, request.sign_font_family, request.sign_font_variant)
+	if applied then
+		if not broadcast_object_state(object_id, request.request_token) then queue_network_update(object_id) end
+		return
+	end
+	if apply_reason == "read_failed" or apply_reason == "write_failed" then
+		queue_host_settings_request(object_id, request, 1)
+		return
+	end
+	if not broadcast_object_state(object_id, request.request_token) then queue_network_update(object_id) end
+end
+
+function receive_authoritative_state(state)
+	if network_is_host() then return end
+	apply_network_state(state)
+end
+
+local function process_object_network_state(object_id)
+	local server_id = network_server_id(object_id)
+	if not server_id then return end
+	local pending = pending_network_states[server_id]
+	if type(pending) ~= "table" or type(pending.state) ~= "table" then return end
+	if (tonumber(pending.ready_time) or 0) > current_time_ms() then return end
+	pending_network_states[server_id] = nil
+	apply_network_state(pending.state, (tonumber(pending.attempts) or 0) + 1)
+end
+
+local function open_furniture_menu(object_id)
+	local wrapper = object_id and bind_hf_base.get_wrapper(object_id)
+	local callback = original_open_interact_gui
+		or (placeable_furniture and placeable_furniture.text_sign_original_open_interact_gui)
+	if wrapper and type(callback) == "function" then callback(wrapper) end
+end
+
+local function game_object_id(value)
+	if not value then return nil end
+	local member_ok, id_method = pcall(function() return value["id"] end)
+	if not member_ok or type(id_method) ~= "function" then return nil end
+	local object_ok, object_id = pcall(id_method, value)
+	return object_ok and object_id or nil
+end
+
+local function resolve_interaction_object_id(value)
+	if type(value) == "number" then return value end
+	if type(value) == "string" then return tonumber(value) end
+	if type(value) == "userdata" or type(value) == "table" then
+		local object_id = game_object_id(value)
+		if object_id then return object_id end
+		local wrapper_ok, wrapped_object = pcall(function() return value["object"] end)
+		local wrapper_id = wrapper_ok and game_object_id(wrapped_object) or nil
+		if wrapper_id then return wrapper_id end
+	end
+	return nil
+end
+
+local function server_object_by_id(object_id)
+	local ok, object = pcall(function() return alife_object(tonumber(object_id)) end)
+	return ok and object or nil
+end
+
+local function is_sign_object(object)
+	if not object then return false end
+	local ok, section = pcall(function() return object:section() end)
+	return ok and sign_sections[section] == true
+end
+
+local function sign_object_position(object_id, object)
+	if object then
+		local ok, position = pcall(function() return object:position() end)
+		if ok and position then return position end
+	end
+	local server_object = server_object_by_id(object_id)
+	return server_object and server_object.position or nil
+end
+
+local function sign_object_rotation(object_id)
+	local server_object = server_object_by_id(object_id)
+	return server_object and server_object.angle or vector():set(0, 0, 0)
+end
+
+local function rotated_axis(angle, local_axis)
+	if aol_rotation and aol_rotation.Quaternion then
+		local ok, axis = pcall(function() return aol_rotation.Quaternion(angle):rotate_vector(local_axis) end)
+		if ok and axis then axis:normalize() return axis end
+	end
+	local axis = vector():set(local_axis)
+	axis:normalize()
+	return axis
+end
+
+local function rotated_vector(angle, local_vector)
+	if aol_rotation and aol_rotation.Quaternion then
+		local ok, result = pcall(function() return aol_rotation.Quaternion(angle):rotate_vector(local_vector) end)
+		if ok and result then return result end
+	end
+	return vector():set(local_vector)
+end
+
+local function on_furniture_spawn_cform_experiment(object_id)
+	object_id = tonumber(object_id)
+	if not object_id then return end
+	local server_object = server_object_by_id(object_id)
+	if not server_object then
+		report_cform_error("spawn", "object=" .. tostring(object_id), "result=missing_server_object")
+		return
+	end
+	local section_ok, section = pcall(function() return server_object:section_name() end)
+	if not section_ok or not sign_sections[section] then return end
+	if not (hf_obj_manager and type(hf_obj_manager.update_data) == "function") then
+		report_cform_error("spawn", "object=" .. tostring(object_id), "result=marker_storage_unavailable")
+		return
+	end
+	local object_data, data_read_ok = read_object_sign_storage(object_id)
+	if not data_read_ok then
+		report_cform_error("spawn", "object=" .. tostring(object_id), "result=marker_read_failed")
+		return
+	end
+	if type(object_data) == "table" and tonumber(object_data.text_sign_cform_experiment_shift) then return end
+	local current_position = server_object.position
+	if not current_position then
+		report_cform_error("spawn", "object=" .. tostring(object_id), "result=missing_position")
+		return
+	end
+	local angle = server_object.angle or vector():set(0, 0, 0)
+	local shift = rotated_vector(angle, vector():set(0, -text_sign_cform_experiment_shift, 0))
+	local shifted_position = vector():set(current_position):add(shift)
+	local position_ok = pcall(function() server_object.position = shifted_position end)
+	if not position_ok then
+		report_cform_error("spawn", "object=" .. tostring(object_id), "result=position_update_failed")
+		return
+	end
+	local data_ok, data_result = pcall(hf_obj_manager.update_data, object_id, { text_sign_cform_experiment_shift = text_sign_cform_experiment_shift })
+	if data_ok and data_result ~= false then return end
+	local rollback_ok = pcall(function() server_object.position = current_position end)
+	report_cform_error("spawn", "object=" .. tostring(object_id), "result=data_update_failed", "rollback=" .. tostring(rollback_ok), "error=" .. tostring(data_result))
+end
+
+local function sign_ray_hit_distance(object_id)
+	local object = game_object_by_id(object_id)
+	if not is_sign_object(object) then return nil end
+	local position = sign_object_position(object_id, object)
+	if not position then return nil end
+	local sign_data, data_read_ok = get_object_sign_data(object_id)
+	if not data_read_ok then return nil end
+	local geometry = get_sign_geometry(sign_data)
+	local angle = sign_object_rotation(object_id)
+	local right = rotated_axis(angle, vector():set(1, 0, 0))
+	local normal = rotated_axis(angle, vector():set(0, 1, 0))
+	local up = rotated_axis(angle, vector():set(0, 0, 1))
+	local local_center = vector():set(geometry.position_x, geometry.position_y, geometry.position_z)
+	local center = vector():set(position):add(rotated_vector(angle, local_center))
+	local origin = vector():set(device().cam_pos)
+	local direction = vector():set(device().cam_dir)
+	direction:normalize()
+	local denominator = direction:dotproduct(normal)
+	if denominator >= -0.0001 then return nil end
+	local distance = vector():set(center):sub(origin):dotproduct(normal) / denominator
+	if distance < 0 or distance > 5 then return nil end
+	local hit = vector():set(origin)
+	hit:mad(origin, direction, distance)
+	local offset = vector():set(hit):sub(center)
+	local local_x, local_z = offset:dotproduct(right), offset:dotproduct(up)
+	local half_width = sign_half * geometry.scale_x
+	local half_height = sign_half * geometry.scale_z
+	if not uses_together_core() then
+		local_x, local_z = local_z, local_x
+	end
+	if math.abs(local_x) > half_width or math.abs(local_z) > half_height then return nil end
+	local normalized_x = half_width > 0 and local_x / half_width or 0
+	local normalized_z = half_height > 0 and local_z / half_height or 0
+	return distance, normalized_x * normalized_x + normalized_z * normalized_z
+end
+
+local function get_engine_target_sign_id()
+	local engine_target = level and level.get_target_obj and level.get_target_obj() or nil
+	if not is_sign_object(engine_target) then return nil end
+	local engine_id = resolve_interaction_object_id(engine_target)
+	return engine_id and active_signs[engine_id] and engine_id or nil
+end
+
+local function find_aimed_sign()
+	local engine_id = get_engine_target_sign_id()
+	if engine_id then
+		local engine_data, engine_data_read_ok = get_object_sign_data(engine_id)
+		if not engine_data_read_ok or not engine_data or tonumber(engine_data.sign_cform_experiment_shift) == 0 then
+			return engine_id
+		end
+	end
+
+	local cform_visual_id, cform_visual_distance, cform_visual_score = nil, nil, nil
+	local best_id, best_distance = nil, nil
+	for object_id in pairs(active_signs) do
+		local object = game_object_by_id(object_id)
+		if not object then
+			active_signs[object_id] = nil
+		else
+			local distance, aim_score = sign_ray_hit_distance(object_id)
+			if distance then
+				if not best_distance or distance < best_distance - 0.0001
+					or (math.abs(distance - best_distance) <= 0.0001 and tonumber(object_id) < tonumber(best_id)) then
+					best_id, best_distance = object_id, distance
+				end
+				local data, data_read_ok = get_object_sign_data(object_id)
+				local cform_shift = data_read_ok and data and tonumber(data.sign_cform_experiment_shift) or 0
+				if cform_shift ~= 0 and (not cform_visual_score or aim_score < cform_visual_score - 0.0001
+					or (math.abs(aim_score - cform_visual_score) <= 0.0001 and (not cform_visual_distance or distance < cform_visual_distance - 0.0001))
+					or (math.abs(aim_score - cform_visual_score) <= 0.0001 and cform_visual_distance and math.abs(distance - cform_visual_distance) <= 0.0001 and tonumber(object_id) < tonumber(cform_visual_id))) then
+					cform_visual_id, cform_visual_distance, cform_visual_score = object_id, distance, aim_score
+				end
+			end
+		end
+	end
+	if cform_visual_id then return cform_visual_id end
+	if engine_id then return engine_id end
+	return best_id
+end
+
+local function text_sign_debug_text(value)
+	local text = string.gsub(trim_sign_text(value), "\n", "\\n")
+	if string.len(text) > 96 then return string.sub(text, 1, 93) .. "..." end
+	return text
+end
+
+local function build_text_sign_debug_snapshot()
+	local engine_object = level and level.get_target_obj and level.get_target_obj() or nil
+	local engine_id = resolve_interaction_object_id(engine_object)
+	local engine_section = nil
+	if engine_object then pcall(function() engine_section = engine_object:section() end) end
+
+	local candidates = {}
+	for object_id in pairs(active_signs) do
+		local object = game_object_by_id(object_id)
+		if object then
+			local distance = sign_ray_hit_distance(object_id)
+				if distance then
+					local data, data_read_ok = get_object_sign_data(object_id)
+					if data_read_ok and data then
+						candidates[#candidates + 1] = {
+							id = object_id,
+							distance = distance,
+							text = text_sign_debug_text(data.sign_text),
+							slot = data.sign_slot,
+							cform_shift = data.sign_cform_experiment_shift
+						}
+					end
+				end
+		end
+	end
+	 table.sort(candidates, function(left, right)
+		if math.abs(left.distance - right.distance) <= 0.0001 then return tonumber(left.id) < tonumber(right.id) end
+		return left.distance < right.distance
+	end)
+
+	local selected_id = find_aimed_sign()
+	local selected_data, selected_data_read_ok = nil, false
+	if selected_id then selected_data, selected_data_read_ok = get_object_sign_data(selected_id) end
+	return {
+		engine_id = engine_id,
+		engine_section = engine_section,
+		selected_id = selected_id,
+		selected_text = selected_data and selected_data_read_ok and text_sign_debug_text(selected_data.sign_text) or nil,
+		selected_slot = selected_data and selected_data_read_ok and selected_data.sign_slot or nil,
+		selected_cform_shift = selected_data and selected_data_read_ok and selected_data.sign_cform_experiment_shift or nil,
+		hold_key = text_sign_hold_key,
+		hold_sign_id = text_sign_hold_sign_id,
+		hold_elapsed = text_sign_hold_started_at and current_time_ms() - text_sign_hold_started_at or nil,
+		hold_consumed = text_sign_hold_consumed,
+		current_sign_id = current_sign_id,
+		gui_shown = GUI and GUI:IsShown() or false,
+		ui_inventory_loot_guard = ui_inventory_loot_guard_installed,
+		deferred_loot_sign_id = text_sign_deferred_loot_sign_id,
+		candidates = candidates
+	}
+end
+
+local function find_click_through_target()
+	if type(ray_pick) ~= "function" and type(ray_pick) ~= "userdata" then return nil end
+	local origin = vector():set(device().cam_pos)
+	local direction = vector():set(device().cam_dir)
+	direction:normalize()
+	local travelled = 0
+	for _ = 1, sign_texture_slots do
+		local remaining = 5 - travelled
+		if remaining <= 0 then return nil end
+		local start_position = vector():set(origin)
+		start_position:mad(origin, direction, travelled)
+		local ray = nil
+		local setup_ok = pcall(function()
+			ray = ray_pick()
+			ray:set_position(start_position)
+			ray:set_direction(direction)
+			ray:set_range(remaining)
+			ray:set_flags(3)
+			if db.actor then pcall(function() ray:set_ignore_object(db.actor) end) end
+		end)
+		if not setup_ok or not ray then return nil end
+		local query_ok, hit = pcall(function() return ray:query() end)
+		if not query_ok or not hit then return nil end
+		local object_ok, target = pcall(function() return ray:get_object() end)
+		if not object_ok or not target then return nil end
+		if not is_sign_object(target) then return target end
+		local distance_ok, distance = pcall(function() return ray:get_distance() end)
+		local numeric_distance = distance_ok and tonumber(distance) or nil
+		if numeric_distance == nil then return nil end
+		travelled = travelled + math.max(numeric_distance, 0) + 0.05
+	end
+	return nil
+end
+
+local function install_furniture_interaction_hook()
+	if not placeable_furniture or type(placeable_furniture.open_interact_gui) ~= "function" then
+		report_interaction_error("hook.install", "status=unavailable")
+		return
+	end
+	local original = placeable_furniture.text_sign_original_open_interact_gui
+	if type(original) ~= "function" then
+		original = placeable_furniture.open_interact_gui
+		placeable_furniture.text_sign_original_open_interact_gui = original
+	end
+	original_open_interact_gui = original
+		placeable_furniture.open_interact_gui = function(wrapper)
+			if text_sign_deferred_loot_object or (text_sign_hold_key and text_sign_hold_sign_id) then return end
+			return original(wrapper)
+		end
+end
+
+local function install_furniture_target_guard()
+	if not placeable_furniture or type(placeable_furniture.get_wrapper_at_crosshair) ~= "function" then
+		report_interaction_error("hook.target_guard", "status=unavailable")
+		return
+	end
+	local original = placeable_furniture.text_sign_original_get_wrapper_at_crosshair
+	if type(original) ~= "function" then
+		original = placeable_furniture.get_wrapper_at_crosshair
+		placeable_furniture.text_sign_original_get_wrapper_at_crosshair = original
+	end
+		placeable_furniture.get_wrapper_at_crosshair = function()
+				if text_sign_deferred_loot_object then
+					return nil
+			end
+			return original()
+		end
+end
+
+local function install_furniture_advanced_ui_hook()
+	if furniture_advanced_ui_hook_installed then return true end
+	if not placeable_furniture or type(placeable_furniture.update_radial_gui) ~= "function" then return false end
+	local original = placeable_furniture.text_sign_original_update_radial_gui
+	if type(original) ~= "function" then
+		original = placeable_furniture.update_radial_gui
+		placeable_furniture.text_sign_original_update_radial_gui = original
+	end
+	placeable_furniture.update_radial_gui = function(wrapper)
+		local object = wrapper and wrapper.object
+		if not is_sign_object(object) or not hf_furniture_types or type(hf_furniture_types.get_type) ~= "function" then
+			return original(wrapper)
+		end
+		local original_get_type = hf_furniture_types.get_type
+		hf_furniture_types.get_type = function(candidate)
+			if candidate == object then return "text_sign" end
+			return original_get_type(candidate)
+		end
+		local ok, result = pcall(original, wrapper)
+		hf_furniture_types.get_type = original_get_type
+		if not ok then
+			report_interaction_error("hook.advanced_ui", "result=update_failed", "sign=" .. tostring(resolve_interaction_object_id(object)), "error=" .. tostring(result))
+			return
+		end
+		return result
+	end
+	furniture_advanced_ui_hook_installed = true
+	return true
+end
+
+local function install_ui_inventory_loot_guard()
+	if ui_inventory_loot_guard_installed then return true end
+	if type(ui_inventory) ~= "table" or type(ui_inventory.start) ~= "function" then return false end
+	local original = ui_inventory.text_sign_original_start
+	if type(original) ~= "function" then
+		original = ui_inventory.start
+		ui_inventory.text_sign_original_start = original
+	end
+	original_ui_inventory_start = original
+	ui_inventory.start = function(mode, object)
+		if text_sign_deferred_loot_replaying then return original(mode, object) end
+		if mode == "loot" then
+			local interaction_object = object
+			if is_sign_object(interaction_object) then
+				interaction_object = find_click_through_target()
+				if not interaction_object then
+					text_sign_deferred_loot_object = nil
+					text_sign_deferred_loot_sign_id = nil
+					return
+				end
+			end
+			local visual_sign_id = find_aimed_sign()
+			if visual_sign_id then
+				text_sign_deferred_loot_object = interaction_object
+				text_sign_deferred_loot_sign_id = visual_sign_id
+				return
+			end
+		end
+		return original(mode, object)
+	end
+	ui_inventory_loot_guard_installed = true
+	return true
+end
+
+local function on_before_furniture_release(object_id)
+	local data = read_object_sign_data(object_id)
+	pending_destroy_checks[object_id] = nil
+	if data then release_slot(object_id, data.sign_slot) end
+end
+
+function init(object)
+	object:bind_object(sign_wrapper(object).binder)
+end
+
+class "sign_wrapper" (bind_hf_base.hf_binder_wrapper)
+
+function sign_wrapper:__init(object) super(object) end
+
+function sign_wrapper:net_spawn(server_object)
+	if bind_hf_base.hf_binder_wrapper.net_spawn(self, server_object) == false then return false end
+	local object_id = self.object:id()
+	pending_destroy_checks[object_id] = nil
+	active_signs[object_id] = true
+	pending_initializations[object_id] = true
+	return true
+end
+
+function sign_wrapper:net_destroy()
+	local object_id = self.object:id()
+	local data = read_object_sign_data(object_id)
+	local slot = data and normalize_slot(data.sign_slot)
+	if slot ~= nil then
+		pending_destroy_checks[object_id] = {
+			slot = slot,
+			ready_time = current_time_ms() + released_slot_cleanup_delay
+		}
+	end
+	active_signs[object_id] = nil
+	network_request_times[object_id] = nil
+	pending_initializations[object_id] = nil
+	pending_renders[object_id] = nil
+	pending_network_updates[object_id] = nil
+	pending_host_settings_requests[object_id] = nil
+	pending_attachment_resets[object_id] = nil
+	release_visual_slots(object_id, slot)
+	local server_id = network_server_id(object_id)
+	if server_id then pending_network_states[server_id] = nil end
+	bind_hf_base.hf_binder_wrapper.net_destroy(self)
+end
+
+function sign_wrapper:use_callback_simple()
+end
+
+function sign_wrapper:use_callback()
+	local current_id = game_object_id(self and self.object)
+	if not current_id then
+		report_interaction_error("sign.use_callback", "sign=nil", "action=ignored_missing_object")
+		return
+	end
+	if type(open_sign_gui) ~= "function" then
+		report_interaction_error("sign.use_callback", "sign=" .. tostring(current_id), "action=ignored_gui_unavailable")
+		return
+	end
+	local aimed_id = find_aimed_sign()
+	open_sign_gui(aimed_id or current_id)
+end
+
+function sign_wrapper:update(delta)
+	local object_id = self.object:id()
+	bind_hf_base.hf_binder_wrapper.update(self, delta)
+	local pending_initialization = pending_initializations[object_id]
+	if pending_initialization then
+		local ready_time = type(pending_initialization) == "table" and pending_initialization.ready_time or 0
+		if ready_time <= current_time_ms() then
+			local refreshed, retry_reason = refresh_object_visual(object_id)
+			if refreshed or (retry_reason ~= "read_failed" and retry_reason ~= "write_failed") then
+				pending_initializations[object_id] = nil
+			else
+				local attempts = type(pending_initialization) == "table" and (tonumber(pending_initialization.attempts) or 0) + 1 or 1
+					if attempts >= storage_retry_limit then
+						pending_initializations[object_id] = nil
+						report_storage_retry_exhausted("initialization", object_id)
+					else
+					pending_initializations[object_id] = { attempts = attempts, ready_time = current_time_ms() + storage_retry_delay }
+				end
+			end
+		end
+	end
+	process_pending_attachment_reset(object_id)
+	process_pending_host_settings_request(object_id)
+	process_object_network_state(object_id)
+	if pending_renders[object_id] then
+		process_pending_render(object_id)
+	end
+end
+
+function sign_wrapper:refresh_visual()
+	refresh_object_visual(self.object:id())
+end
+
+open_sign_gui = function(object_id)
+	if GUI and GUI:IsShown() then return end
+	if not is_sign_object(game_object_by_id(object_id)) then
+		object_id = find_aimed_sign()
+		if not object_id then
+			local target = level and level.get_target_obj and level.get_target_obj() or nil
+			object_id = is_sign_object(target) and resolve_interaction_object_id(target) or nil
+		end
+	end
+	if not object_id then return end
+	current_sign_id = object_id
+	if GUI then GUI = nil end
+	GUI = TextSign()
+	if not GUI:RefreshControls() then
+		GUI = nil
+		return
+	end
+	GUI:ShowDialog(true)
+	Register_UI("TextSign", "text_sign")
+end
+
+function open_placeable_sign()
+end
+
+function get_aimed_object()
+	local target = level and level.get_target_obj and level.get_target_obj() or nil
+	if get_engine_target_sign_id() then return target end
+	return nil
+end
+
+local function get_text_sign_use_key()
+	if type(bind_to_dik) ~= "function" or not key_bindings then return nil end
+	local resolved_ok, dik = pcall(bind_to_dik, key_bindings.kUSE)
+	return resolved_ok and dik or nil
+end
+
+local function is_text_sign_use_key_down(dik)
+	if not dik or type(key_state) ~= "function" then return false end
+	local state_ok, state = pcall(key_state, dik)
+	return state_ok and (state == true or state == 1)
+end
+
+local function get_text_sign_hold_duration()
+	if ui_mcm and type(ui_mcm.get) == "function" then
+		local duration_factor = select(2, pcall(ui_mcm.get, "mcm/mcm_kb/mcm_kb_main/presstime"))
+		local tap_duration = select(2, pcall(ui_mcm.get, "mcm/mcm_kb/mcm_kb_main/dtaptime2"))
+		local duration = (tonumber(duration_factor) or 0) * (tonumber(tap_duration) or 0)
+		if duration > 0 then return duration end
+	end
+	return text_sign_hold_min_duration
+end
+
+local function clear_deferred_loot()
+	text_sign_deferred_loot_object = nil
+	text_sign_deferred_loot_sign_id = nil
+end
+
+local function replay_deferred_loot()
+	local object = text_sign_deferred_loot_object
+	local sign_id = text_sign_deferred_loot_sign_id
+	local callback = original_ui_inventory_start or (ui_inventory and ui_inventory.text_sign_original_start)
+	clear_deferred_loot()
+	if not object or type(callback) ~= "function" then
+		report_interaction_error("deferred_loot.replay", "result=unavailable", "sign=" .. tostring(sign_id))
+		return false
+	end
+	text_sign_deferred_loot_replaying = true
+	local replay_ok, replay_error = pcall(callback, "loot", object)
+	text_sign_deferred_loot_replaying = false
+	if not replay_ok then
+		report_interaction_error("deferred_loot.replay", "result=callback_failed", "sign=" .. tostring(sign_id), "error=" .. tostring(replay_error))
+	end
+	return replay_ok
+end
+
+local function reset_text_sign_hold()
+	text_sign_hold_key = nil
+	text_sign_hold_sign_id = nil
+	text_sign_hold_started_at = nil
+	text_sign_hold_consumed = false
+end
+
+local function begin_text_sign_hold(dik)
+	if GUI and GUI:IsShown() then
+		reset_text_sign_hold()
+		return false
+	end
+	local object_id = find_aimed_sign()
+	if not object_id then
+		reset_text_sign_hold()
+		return false
+	end
+	text_sign_hold_key = dik
+	text_sign_hold_sign_id = text_sign_deferred_loot_sign_id or object_id
+	text_sign_hold_started_at = current_time_ms()
+	text_sign_hold_consumed = false
+	return true
+end
+
+local function process_text_sign_hold()
+	if not text_sign_hold_key or text_sign_hold_consumed or not text_sign_hold_started_at then return end
+	if GUI and GUI:IsShown() then
+		reset_text_sign_hold()
+		return
+	end
+	if type(key_state) == "function" then
+		local state_ok, state = pcall(key_state, text_sign_hold_key)
+		if state_ok and (state == false or state == 0) then
+			reset_text_sign_hold()
+			return
+		end
+	end
+	local elapsed = current_time_ms() - text_sign_hold_started_at
+	if elapsed < get_text_sign_hold_duration() then return end
+	local object_id = find_aimed_sign()
+	if object_id ~= text_sign_hold_sign_id then return end
+	text_sign_hold_consumed = true
+	clear_deferred_loot()
+	open_sign_gui(object_id)
+end
+
+local function update_text_sign_hold()
+	local dik = get_text_sign_use_key()
+	local key_is_down = is_text_sign_use_key_down(dik)
+	if not key_is_down then
+		local consumed = text_sign_hold_consumed
+		if text_sign_hold_key then reset_text_sign_hold() end
+		text_sign_use_key_was_down = false
+		if text_sign_deferred_loot_object then
+			if consumed then clear_deferred_loot() else replay_deferred_loot() end
+		end
+		return
+	end
+	if text_sign_use_key_was_down then
+		process_text_sign_hold()
+		return
+	end
+	text_sign_use_key_was_down = true
+	begin_text_sign_hold(dik)
+end
+
+local sign_ui_commands = {
+	{ type = "button", name = "st_text_sign_menu" },
+	{ type = "line" },
+	{ type = "input", name = "st_text_sign_input_label" },
+	{
+		key = "font_family", name = "st_text_sign_font_family", min = 0, max = 0,
+		maximum = function(self) return math.max(0, #(self.font_catalog or {}) - 1) end,
+		value = function(self) return self:FindFamilyIndex(self.edit_data.sign_font_family) end,
+		label = function(self, value)
+			local family = self:GetFamily(value)
+			return family and family.name or "-"
+		end,
+		set = function(self, value)
+			local family = self:GetFamily(value)
+			if not family then return false end
+			self.edit_data.sign_font_family = family.name
+			local variant = family.variants and family.variants[1]
+			self.edit_data.sign_font_variant = variant and variant.name or ""
+			return true
+		end,
+		refresh_tracks = true
+	},
+	{
+		key = "font_variant", name = "st_text_sign_font_variant", min = 0, max = 0,
+		maximum = function(self)
+			local family = self:GetFamily(self:FindFamilyIndex(self.edit_data.sign_font_family))
+			return math.max(0, #(family and family.variants or {}) - 1)
+		end,
+		value = function(self)
+			return self:FindVariantIndex(self:FindFamilyIndex(self.edit_data.sign_font_family), self.edit_data.sign_font_variant)
+		end,
+		label = function(self, value)
+			local variant = self:GetVariant(self:FindFamilyIndex(self.edit_data.sign_font_family), value)
+			return variant and variant.name or "-"
+		end,
+		set = function(self, value)
+			local variant = self:GetVariant(self:FindFamilyIndex(self.edit_data.sign_font_family), value)
+			if not variant then return false end
+			self.edit_data.sign_font_variant = variant.name
+			return true
+		end
+	},
+	{ key = "text_size", name = "st_text_sign_text_size", min = sign_text_size_min, max = sign_text_size_max, field = "sign_text_size", normalize = normalize_text_size, suffix = "%" },
+	{ key = "red", name = "st_text_sign_color_red", min = 0, max = 255, color_channel = "red", normalize = normalize_color_channel, label_color = { 235, 70, 70 } },
+	{ key = "green", name = "st_text_sign_color_green", min = 0, max = 255, color_channel = "green", normalize = normalize_color_channel, label_color = { 80, 225, 100 } },
+	{ key = "blue", name = "st_text_sign_color_blue", min = 0, max = 255, color_channel = "blue", normalize = normalize_color_channel, label_color = { 90, 145, 255 } },
+		{ key = "alpha", name = "st_text_sign_color_transparency", min = sign_text_alpha_min, max = sign_text_alpha_max, field = "sign_text_alpha", normalize = normalize_text_alpha, suffix = "%", visible = function(self) return material_supports_text_alpha(self.edit_data.sign_material) end },
+	{ type = "line" },
+	{ key = "width", name = "st_text_sign_size_width", min = sign_size_min, max = sign_size_max, step = 0.5, field = "sign_width", normalize = normalize_dimension, format = "number" },
+	{ key = "height", name = "st_text_sign_size_height", min = sign_size_min, max = sign_size_max, step = 0.5, field = "sign_height", normalize = normalize_dimension, format = "number" },
+	{ key = "offset_x", name = "st_text_sign_offset_x", min = -sign_offset_limit, max = sign_offset_limit, step = 0.5, field = "sign_offset_x", normalize = normalize_offset, format = "offset" },
+	{ key = "offset_y", name = "st_text_sign_offset_y", min = -sign_offset_limit, max = sign_offset_limit, step = 0.5, field = "sign_offset_y", normalize = normalize_offset, format = "offset" },
+	{ key = "offset_z", name = "st_text_sign_offset_z", min = -sign_offset_limit, max = sign_offset_limit, step = 0.5, field = "sign_offset_z", normalize = normalize_offset, format = "offset" }
+}
+
+local function sign_ui_translate(key)
+	if game and game.translate_string then
+		local ok, translated = pcall(game.translate_string, key)
+		if ok and translated and translated ~= "" then return translated end
+	end
+	return tostring(key or "")
+end
+
+class "TextSign" (CUIScriptWnd)
+
+function TextSign:__init() super()
+	self:InitControls()
+end
+
+function TextSign:InitControls()
+	self:SetWndRect(Frect():set(0, 0, 1024, 768))
+	self:SetAutoDelete(true)
+
+	self.xml = CScriptXmlInit()
+	self.xml:ParseFile("ui_text_sign.xml")
+	local xml = self.xml
+	local xml_root = "text_sign_config"
+
+	self.dialog = xml:InitStatic(xml_root, self)
+	xml:InitFrame(xml_root .. ":frame", self.dialog)
+	self.scroll = xml:InitScrollView(xml_root .. ":scroll", self.dialog)
+	self.scroll:Clear()
+	self.Track = {}
+	self.Num = {}
+	self.Value = {}
+	self.font_catalog = self:GetFontCatalog()
+	self.edit_data = {
+		sign_text = "",
+		sign_text_size = sign_text_size_default,
+		sign_font_family = default_font_family,
+		sign_font_variant = default_font_variant,
+		sign_text_color = { red = 8, green = 8, blue = 8 },
+		sign_text_alpha = sign_text_alpha_default,
+		sign_material = "paper",
+		sign_width = sign_size_default,
+		sign_height = sign_size_default,
+		sign_offset_x = sign_offset_default,
+		sign_offset_y = sign_offset_default,
+		sign_offset_z = sign_offset_default
+	}
+
+	for index, command in ipairs(sign_ui_commands) do
+		local row
+		if command.type == "line" then
+			row = xml:InitStatic(xml_root .. ":divider", nil)
+			local divider = xml:InitStatic(xml_root .. ":divider:line", row)
+			divider:SetTextureColor(GetARGB(255, 200, 200, 200))
+		elseif command.type == "button" then
+			row = xml:InitStatic(xml_root .. ":st", nil)
+			xml:InitFrame(xml_root .. ":command_button_frame", row)
+			local button_text = xml:InitStatic(xml_root .. ":command_button_text", row)
+			button_text:TextControl():SetText(sign_ui_translate(command.name))
+			self.interact_button = xml:Init3tButton(xml_root .. ":command_button", row)
+			self:Register(self.interact_button, "interact_button")
+			self:AddCallback("interact_button", ui_events.BUTTON_CLICKED, self.OpenFurnitureMenu, self)
+		elseif command.type == "input" then
+			row = xml:InitStatic(xml_root .. ":st", nil)
+			local label = xml:InitStatic(xml_root .. ":cap", row)
+			label:TextControl():SetText(sign_ui_translate(command.name))
+			self.sign_input = xml:InitEditBox(xml_root .. ":input", row)
+			self:Register(self.sign_input, "sign_input")
+			self:AddCallback("sign_input", ui_events.EDIT_TEXT_COMMIT, self.ApplyTextInput, self)
+		else
+			row = xml:InitStatic(xml_root .. ":st", nil)
+			local label = xml:InitStatic(xml_root .. ":cap", row)
+			label:TextControl():SetText(sign_ui_translate(command.name))
+			if command.label_color then
+				pcall(function()
+					label:TextControl():SetTextColor(GetARGB(255, command.label_color[1], command.label_color[2], command.label_color[3]))
+				end)
+			end
+			self.Track[index] = xml:InitTrackBar(xml_root .. ":track", row)
+			self.Track[index]:SetStep(command.step or 1)
+			self.Num[index] = xml:InitTextWnd(xml_root .. ":num", row)
+			if command.key == "red" then self.color_preview = xml:InitStatic(xml_root .. ":color_preview", row) end
+		end
+
+			self.Row = self.Row or {}
+			self.Row[index] = row
+			self.scroll:AddWindow(row, true)
+			row:SetAutoDelete(true)
+	end
+end
+
+function TextSign:GetFontCatalog()
+	local runtime = font_runtime()
+	if runtime and runtime.get_font_catalog then
+		local ok, catalog = pcall(runtime.get_font_catalog, false)
+		if ok and type(catalog) == "table" then return catalog end
+	end
+	return {}
+end
+
+function TextSign:FindFamilyIndex(name)
+	for index, family in ipairs(self.font_catalog or {}) do
+		if family.name == name then return index - 1 end
+	end
+	for index, family in ipairs(self.font_catalog or {}) do
+		if family.name == default_font_family then return index - 1 end
+	end
+	return 0
+end
+
+function TextSign:GetFamily(index)
+	return self.font_catalog and self.font_catalog[(tonumber(index) or 0) + 1] or nil
+end
+
+function TextSign:FindVariantIndex(family_index, name)
+	local family = self:GetFamily(family_index)
+	for index, variant in ipairs(family and family.variants or {}) do
+		if variant.name == name then return index - 1 end
+	end
+	return 0
+end
+
+function TextSign:GetVariant(family_index, variant_index)
+	local family = self:GetFamily(family_index)
+	return family and family.variants and family.variants[(tonumber(variant_index) or 0) + 1] or nil
+end
+
+function TextSign:CommandMaximum(command)
+	if command.maximum then return command.maximum(self) end
+	return command.max
+end
+
+function TextSign:CommandValue(command)
+	if command.value then return command.value(self) end
+	if command.color_channel then return self.edit_data.sign_text_color[command.color_channel] end
+	return self.edit_data[command.field] or 0
+end
+
+function TextSign:NormalizeCommandValue(command, value)
+	local minimum = command.min or 0
+	local maximum = self:CommandMaximum(command)
+	local step = command.step or 1
+	value = tonumber(value) or minimum
+	if value < minimum then value = minimum end
+	if value > maximum then value = maximum end
+	value = minimum + math.floor(((value - minimum) / step) + 0.5) * step
+	if value < minimum then return minimum end
+	if value > maximum then return maximum end
+	return value
+end
+
+local function format_sign_ui_number(value)
+	if math.abs(value - math.floor(value + 0.5)) < 0.0001 then return tostring(math.floor(value + 0.5)) end
+	return string.format("%.1f", value)
+end
+
+function TextSign:CommandLabel(command, value)
+	if command.label then return command.label(self, value) end
+	if command.suffix then return tostring(value) .. command.suffix end
+	if command.format == "offset" then
+		if math.abs(value) < 0.0001 then return "0" end
+		local text = format_sign_ui_number(value)
+		return value > 0 and ("+" .. text) or text
+	end
+	if command.format == "number" then return format_sign_ui_number(value) end
+	return tostring(value)
+end
+
+function TextSign:RefreshColorPreview()
+	local color = self.edit_data and self.edit_data.sign_text_color
+	if not self.color_preview or type(color) ~= "table" then return end
+	local red = normalize_color_channel(color.red)
+	local green = normalize_color_channel(color.green)
+	local blue = normalize_color_channel(color.blue)
+	pcall(function() self.color_preview:SetTextureColor(GetARGB(255, red, green, blue)) end)
+end
+function TextSign:DataSignature()
+	return settings_signature(self.edit_data)
+end
+
+function TextSign:ApplyCurrentData()
+	if self.refreshing or not current_sign_id then return end
+	local signature = self:DataSignature()
+	if signature == self.last_applied_signature then return end
+	local data = self.edit_data
+	local applied = submit_object_settings(current_sign_id, data.sign_text, data.sign_text_size, data, data.sign_text_color, data.sign_text_alpha, data.sign_font_family, data.sign_font_variant)
+	if applied then self.last_applied_signature = signature end
+end
+
+function TextSign:SetCommandValue(command, value)
+	value = self:NormalizeCommandValue(command, value)
+	if command.set then
+		if not command.set(self, value) then return end
+	elseif command.color_channel then
+		self.edit_data.sign_text_color[command.color_channel] = command.normalize(value)
+	elseif command.field then
+		self.edit_data[command.field] = command.normalize(value)
+	end
+		self:ApplyCurrentData()
+	if command.color_channel then self:RefreshColorPreview() end
+	if command.refresh_tracks then self:RefreshTrackControls() end
+end
+function TextSign:RefreshTrackControls()
+	for index, command in ipairs(sign_ui_commands) do
+		local visible = not command.visible or command.visible(self) ~= false
+		local row = self.Row and self.Row[index]
+		if row then pcall(function() row:Show(visible) end) end
+		local track = self.Track[index]
+		if visible and track then
+			local maximum = self:CommandMaximum(command)
+			track:SetOptFBounds(command.min, maximum)
+			local value = self:NormalizeCommandValue(command, self:CommandValue(command))
+			track:SetFValue(value)
+						self.Value[index] = value
+			self.Num[index]:SetText(self:CommandLabel(command, value))
+		end
+	end
+	self:RefreshColorPreview()
+end
+function TextSign:RefreshControls()
+	local data, data_read_ok = get_object_sign_data(current_sign_id)
+	local sign_input = self.sign_input
+	if not data_read_ok or not data or not sign_input then return false end
+	self.refreshing = true
+	self.font_catalog = self:GetFontCatalog()
+	local edit_data = data
+	self.edit_data = edit_data
+	local input_text = sign_text_to_input(edit_data.sign_text)
+	sign_input:SetText(input_text)
+	self.last_text = input_text
+	self.input_cursor = string.len(input_text)
+	pcall(function() sign_input:CaptureFocus(false) end)
+	self.last_applied_signature = settings_signature(edit_data)
+	self:RefreshTrackControls()
+	self.refreshing = false
+	return true
+end
+
+function TextSign:ApplyTextInput()
+	if self.refreshing or not self.sign_input then return end
+	local input_text = tostring(self.sign_input:GetText() or "")
+	local text = sign_text_from_input(input_text)
+	local canonical_input = sign_text_to_input(text)
+	if canonical_input ~= input_text then self.sign_input:SetText(canonical_input) end
+	self.last_text = canonical_input
+	self.edit_data.sign_text = text
+	self:ApplyCurrentData()
+end
+
+function TextSign:DispatchInputKey(key)
+	if not key then return false end
+	local ok = pcall(function() CUIScriptWnd.OnKeyboard(self, key, ui_events.WINDOW_KEY_PRESSED) end)
+	return ok
+end
+
+function TextSign:MoveInputCursor(input_text, byte_position)
+	byte_position = math.max(0, math.min(string.len(input_text), tonumber(byte_position) or string.len(input_text)))
+	self:DispatchInputKey(DIK_keys.DIK_HOME)
+	local movements = input_character_count(string.sub(input_text, 1, byte_position))
+	for _ = 1, movements do self:DispatchInputKey(DIK_keys.DIK_RIGHT) end
+	self.input_cursor = byte_position
+end
+
+function TextSign:ProbeInputSelection(input_text)
+	local probes = { "804726", "159384", "627501", "930572" }
+	local probe = nil
+	for _, candidate in ipairs(probes) do
+		if not string.find(input_text, candidate, 1, true) then probe = candidate break end
+	end
+	if not probe then return nil, nil end
+	local digit_keys = {
+		["0"] = DIK_keys.DIK_0, ["1"] = DIK_keys.DIK_1, ["2"] = DIK_keys.DIK_2,
+		["3"] = DIK_keys.DIK_3, ["4"] = DIK_keys.DIK_4, ["5"] = DIK_keys.DIK_5,
+		["6"] = DIK_keys.DIK_6, ["7"] = DIK_keys.DIK_7, ["8"] = DIK_keys.DIK_8,
+		["9"] = DIK_keys.DIK_9
+	}
+	for digit in string.gmatch(probe, ".") do self:DispatchInputKey(digit_keys[digit]) end
+	local probed_text = tostring(self.sign_input:GetText() or "")
+	local probe_start = string.find(probed_text, probe, 1, true)
+	if probe_start then
+		local start_position = probe_start - 1
+		local suffix_length = string.len(probed_text) - start_position - string.len(probe)
+		local prefix_matches = string.sub(input_text, 1, start_position) == string.sub(probed_text, 1, start_position)
+		local suffix_matches = suffix_length == 0
+			or string.sub(input_text, -suffix_length) == string.sub(probed_text, -suffix_length)
+		if prefix_matches and suffix_matches then
+			return start_position, string.len(input_text) - suffix_length
+		end
+	end
+	self.sign_input:SetText(input_text)
+	self:MoveInputCursor(input_text, self.input_cursor or string.len(input_text))
+	return nil, nil
+end
+
+function TextSign:InsertLineBreak()
+	if self.refreshing or not self.sign_input then return end
+	local input_text = tostring(self.sign_input:GetText() or "")
+	local start_position, end_position = self:ProbeInputSelection(input_text)
+	if start_position == nil then
+		start_position = math.max(0, math.min(string.len(input_text), self.input_cursor or string.len(input_text)))
+		end_position = start_position
+	end
+	local next_input = string.sub(input_text, 1, start_position) .. "\\n" .. string.sub(input_text, end_position + 1)
+	local decoded_text = string.gsub(next_input, "\\n", "\n")
+	if string.len(decoded_text) > sign_text_max_length then
+		self.sign_input:SetText(input_text)
+		self:MoveInputCursor(input_text, start_position)
+		return
+	end
+	local next_cursor = start_position + 2
+	self.sign_input:SetText(next_input)
+	self:MoveInputCursor(next_input, next_cursor)
+	self:ApplyTextInput()
+end
+
+function TextSign:OpenFurnitureMenu()
+	local object_id = current_sign_id
+	self:ApplyTextInput()
+	self:Close()
+	open_furniture_menu(object_id)
+end
+
+function TextSign:Update()
+	CUIScriptWnd.Update(self)
+	if self.refreshing then return end
+
+	local input_text = tostring(self.sign_input:GetText() or "")
+	if input_text ~= self.last_text then
+		local _, _, inserted_end = changed_text_range(self.last_text, input_text)
+		local text = sign_text_from_input(input_text)
+		local canonical_input = sign_text_to_input(text)
+		if canonical_input ~= input_text then self.sign_input:SetText(canonical_input) end
+		self.edit_data.sign_text = text
+		self.last_text = canonical_input
+		self.input_cursor = math.min(inserted_end, string.len(canonical_input))
+		self:ApplyCurrentData()
+	end
+
+	for index, track in pairs(self.Track) do
+		local command = sign_ui_commands[index]
+		local value = self:NormalizeCommandValue(command, track:GetFValue())
+		if value ~= self.Value[index] then
+			self.Value[index] = value
+			self:SetCommandValue(command, value)
+			self.Num[index]:SetText(self:CommandLabel(command, value))
+			return
+		end
+	end
+
+	if current_sign_id and pending_renders[current_sign_id] then process_pending_render(current_sign_id) end
+end
+
+function TextSign:OnKeyboard(key, keyboard_action)
+	if keyboard_action == ui_events.WINDOW_KEY_PRESSED then
+		if key == DIK_keys.DIK_ESCAPE then self:Close() return true end
+		if key == DIK_keys.DIK_RETURN or key == DIK_keys.DIK_NUMPADENTER then self:InsertLineBreak() return true end
+	end
+	return CUIScriptWnd.OnKeyboard(self, key, keyboard_action)
+end
+
+function TextSign:Close()
+	if self:IsShown() then
+		self:HideDialog()
+		self:Show(false)
+		Unregister_UI("TextSign")
+	end
+	if GUI == self then GUI = nil end
+end
+
+local function serialize_slot_index()
+	local result = {}
+	for _, slot in ipairs(sorted_numeric_keys(used_slots)) do
+		local object_id = used_slots[slot]
+		local data = read_object_sign_data(object_id)
+		if data and trim_sign_text(data.sign_text) ~= "" and normalize_slot(data.sign_slot) == slot and object_exists(object_id) then
+			result[#result + 1] = tostring(slot) .. ":" .. tostring(object_id)
+		end
+	end
+	return table.concat(result, ",")
+end
+
+local function deserialize_slot_index(value)
+	local result = {}
+	for slot_text, object_text in string.gmatch(tostring(value or ""), "(%d+):(%d+)") do
+		local slot, object_id = normalize_slot(slot_text), tonumber(object_text)
+		local data = object_id and read_object_sign_data(object_id)
+		if slot ~= nil and data and trim_sign_text(data.sign_text) ~= "" and normalize_slot(data.sign_slot) == slot and object_exists(object_id) then
+			result[slot] = object_id
+		end
+	end
+	return result
+end
+
+function save_state(save_data)
+	save_data.text_sign_slot_index = serialize_slot_index()
+	end
+
+function load_state(save_data)
+	save_data = save_data or {}
+	used_slots = deserialize_slot_index(save_data.text_sign_slot_index)
+	active_signs = {}
+	pending_initializations = {}
+	pending_renders = {}
+	pending_slot_cleanups = {}
+	pending_variant_compactions = {}
+	pending_destroy_checks = {}
+	pending_network_states = {}
+	pending_network_updates = {}
+	pending_host_settings_requests = {}
+	network_request_times = {}
+	pending_attachment_resets = {}
+	visual_held_slots = {}
+	reset_runtime_slots()
+end
+
+local function on_actor_update()
+	if not ui_inventory_loot_guard_installed then install_ui_inventory_loot_guard() end
+	if not furniture_advanced_ui_hook_installed then install_furniture_advanced_ui_hook() end
+	process_slot_cleanups()
+	process_pending_network_updates()
+	update_text_sign_hold()
+end
+
+function on_game_start()
+	reset_runtime_slots()
+	install_furniture_interaction_hook()
+	install_furniture_target_guard()
+	install_furniture_advanced_ui_hook()
+	install_ui_inventory_loot_guard()
+	if type(_G.raid_shelter_sign) ~= "table" then _G.raid_shelter_sign = {} end
+	_G.raid_shelter_sign.get_aimed_object = get_aimed_object
+	_G.raid_shelter_sign.get_debug_snapshot = build_text_sign_debug_snapshot
+	RegisterScriptCallback("hf_on_before_furniture_release", on_before_furniture_release)
+	RegisterScriptCallback("hf_on_furniture_spawn", on_furniture_spawn_cform_experiment)
+	RegisterScriptCallback("save_state", save_state)
+	RegisterScriptCallback("load_state", load_state)
+	RegisterScriptCallback("actor_on_update", on_actor_update)
+end
