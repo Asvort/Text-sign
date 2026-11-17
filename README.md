@@ -8,6 +8,10 @@
 <details open="">
 <summary>🏞️</summary>
 
+<img width="1920" height="1080" alt="🏞️" src="https://github.com/user-attachments/assets/b7c70ddd-cbeb-4f63-8418-bad34dfd549c" />
+<img width="1920" height="1080" alt="🏞️" src="https://github.com/user-attachments/assets/f6a07bad-20d6-4759-921e-5beb2ee5d701" />
+<img width="1920" height="1080" alt="🏞️" src="https://github.com/user-attachments/assets/4858d09a-7c24-4b3d-951e-6d7727aee147" />
+<img width="1920" height="1080" alt="🏞️" src="https://github.com/user-attachments/assets/d1984fe2-c1de-41dc-a6df-579e51b1672f" />
 </details>
 
 ## [🖥️] Tested || Протестирован
